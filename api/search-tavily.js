@@ -259,6 +259,8 @@ async function filterByScrapedDate(results, startDate, endDate, strictMode = fal
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
 
+  console.log(`[Tavily] filterByScrapedDate: ${results.length} results, strict=${strictMode}, range=${startDate} to ${endDate}`);
+
   // Process all URLs in parallel instead of sequentially (fixes Vercel timeout)
   const processedResults = await Promise.all(
     results.map(async (item) => {
@@ -267,8 +269,10 @@ async function filterByScrapedDate(results, startDate, endDate, strictMode = fal
         const pubMs = new Date(item.published_date).getTime();
         if (!isNaN(pubMs)) {
           if (pubMs >= startMs && pubMs <= endMs) {
+            console.log(`[Tavily] KEEP (API date): ${item.url} - ${item.published_date}`);
             return item;
           }
+          console.log(`[Tavily] SKIP (API date out of range): ${item.url} - ${item.published_date}`);
           return null; // Date exists but outside range
         }
       }
@@ -281,20 +285,29 @@ async function filterByScrapedDate(results, startDate, endDate, strictMode = fal
           item.published_date = scrapedDate.toISOString().split('T')[0];
           item.date_source = 'scraped';
           if (pubMs >= startMs && pubMs <= endMs) {
+            console.log(`[Tavily] KEEP (scraped): ${item.url} - ${item.published_date}`);
             return item;
           }
+          console.log(`[Tavily] SKIP (scraped date out of range): ${item.url} - ${item.published_date}`);
           return null; // Scraped date outside range
         }
       } catch (e) {
-        // Scraping failed - continue
+        console.log(`[Tavily] Scrape error for ${item.url}: ${e.message}`);
       }
 
       // No date found - include only if not in strict mode
-      return strictMode ? null : item;
+      if (strictMode) {
+        console.log(`[Tavily] SKIP (strict mode, no date): ${item.url}`);
+        return null;
+      }
+      console.log(`[Tavily] KEEP (no date, non-strict): ${item.url}`);
+      return item;
     })
   );
 
-  return processedResults.filter(Boolean);
+  const filtered = processedResults.filter(Boolean);
+  console.log(`[Tavily] filterByScrapedDate result: ${filtered.length} of ${results.length} kept`);
+  return filtered;
 }
 
 export default async function handler(req, res) {
@@ -335,6 +348,8 @@ export default async function handler(req, res) {
       tavilyRequest.include_domains = include_domains;
     }
 
+    console.log('[Tavily] Calling Tavily API with:', JSON.stringify(tavilyRequest, null, 2));
+
     const response = await fetch('https://api.tavily.com/search', {
       method: 'POST',
       headers: {
@@ -345,10 +360,12 @@ export default async function handler(req, res) {
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Tavily API error: ${response.status}`);
+      console.error('[Tavily] API error response:', errorText);
+      throw new Error(`Tavily API error: ${response.status} - ${errorText}`);
     }
 
     const data = await response.json();
+    console.log('[Tavily] API returned:', data.results?.length || 0, 'results');
 
     let filteredResults = data.results || [];
 

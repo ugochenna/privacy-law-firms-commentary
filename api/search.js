@@ -204,6 +204,8 @@ async function filterByScrapedDate(results, startDate, endDate, strictMode = fal
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
 
+  console.log(`[Serper] filterByScrapedDate: ${results.length} results, strict=${strictMode}, range=${startDate} to ${endDate}`);
+
   // Process all URLs in parallel instead of sequentially (fixes Vercel timeout)
   const processedResults = await Promise.all(
     results.map(async (item) => {
@@ -212,8 +214,10 @@ async function filterByScrapedDate(results, startDate, endDate, strictMode = fal
         const pubMs = new Date(item.published_date).getTime();
         if (!isNaN(pubMs)) {
           if (pubMs >= startMs && pubMs <= endMs) {
+            console.log(`[Serper] KEEP (API date): ${item.url} - ${item.published_date}`);
             return item;
           }
+          console.log(`[Serper] SKIP (API date out of range): ${item.url} - ${item.published_date}`);
           return null; // Date exists but outside range
         }
       }
@@ -226,20 +230,29 @@ async function filterByScrapedDate(results, startDate, endDate, strictMode = fal
           item.published_date = scrapedDate.toISOString().split('T')[0];
           item.date_source = 'scraped';
           if (pubMs >= startMs && pubMs <= endMs) {
+            console.log(`[Serper] KEEP (scraped): ${item.url} - ${item.published_date}`);
             return item;
           }
+          console.log(`[Serper] SKIP (scraped date out of range): ${item.url} - ${item.published_date}`);
           return null; // Scraped date outside range
         }
       } catch (e) {
-        // Scraping failed - continue
+        console.log(`[Serper] Scrape error for ${item.url}: ${e.message}`);
       }
 
       // No date found - include only if not in strict mode
-      return strictMode ? null : item;
+      if (strictMode) {
+        console.log(`[Serper] SKIP (strict mode, no date): ${item.url}`);
+        return null;
+      }
+      console.log(`[Serper] KEEP (no date, non-strict): ${item.url}`);
+      return item;
     })
   );
 
-  return processedResults.filter(Boolean);
+  const filtered = processedResults.filter(Boolean);
+  console.log(`[Serper] filterByScrapedDate result: ${filtered.length} of ${results.length} kept`);
+  return filtered;
 }
 
 // Serper search endpoint - IMPROVED v2

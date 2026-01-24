@@ -2,6 +2,8 @@ export interface LawFirm {
   name: string;
   url: string;
   region?: string;
+  category?: string; // For grouping (e.g., "Large Firms", "Mid-Tier", "Boutique")
+  specialty?: string[]; // Areas of specialty (e.g., ["patient_support", "privacy"])
 }
 
 export interface Topic {
@@ -10,11 +12,14 @@ export interface Topic {
   icon: string; // Name of the Lucide icon
 }
 
+export type SearchProvider = 'serper' | 'tavily';
+
 export interface ReportConfig {
   startDate: string;
   endDate: string;
   selectedFirms: LawFirm[];
   selectedTopics: Topic[];
+  searchProvider: SearchProvider;
 }
 
 export interface GeneratedReport {
@@ -26,7 +31,9 @@ export enum LegalAreaId {
   PRIVACY = 'privacy',
   AI = 'ai',
   CYBERSECURITY = 'cybersecurity',
-  HEALTH_INFO = 'health_info'
+  HEALTH_INFO = 'health_info',
+  PATIENT_SUPPORT = 'patient_support',
+  CONSENT_TRACKING = 'consent_tracking'
 }
 
 export interface SavedReport {

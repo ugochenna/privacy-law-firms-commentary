@@ -1,7 +1,7 @@
 import { ReportConfig, GeneratedReport } from "../types";
 import { COUNTRIES, PHARMA_AREAS } from "../constants";
 
-const API_BASE = 'http://localhost:3002';
+const API_BASE = '';
 
 interface TavilyResult {
   title: string;
@@ -28,58 +28,118 @@ export const generateLegalReport = async (config: ReportConfig): Promise<Generat
   const countryList = COUNTRIES.join(", ");
   const areaList = PHARMA_AREAS.join(", ");
 
-  // Search ALL selected law firms in parallel batches with rate limiting
+  // Search each topic separately for each firm
+  // Total searches = topics × firms (e.g., 5 topics × 20 firms = 100 searches)
   // Serper API limit: 5 requests per second
   let searchResults = "";
   const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+  // Determine search endpoint based on provider
+  const searchProvider = config.searchProvider || 'serper';
+  const searchEndpoint = searchProvider === 'tavily' ? '/api/search-tavily' : '/api/search';
+  const searchProviderLabel = searchProvider === 'tavily' ? 'Tavily (AI Research)' : 'Serper (Google Search)';
+
+  console.log(`[Search] Using provider: ${searchProviderLabel}`);
+
+  // Extract years from date range for query filtering
+  const startYear = config.startDate.split('-')[0];
+  const endYear = config.endDate.split('-')[0];
+  const yearFilter = startYear === endYear ? startYear : `(${startYear} OR ${endYear})`;
+
+  // Topic keywords mapping - keys must match LEGAL_TOPICS labels exactly
+  // Note: Query template adds "law regulation {year}" so don't duplicate those terms here
+  // IMPORTANT: Keep keywords concise for Serper (Google) - long queries with quoted phrases fail
+  const topicKeywords: Record<string, string> = {
+    'Privacy / Data Protection': 'privacy data protection GDPR',
+    'AI / Automated Decision-Making': 'AI artificial intelligence automated decision',
+    'Cybersecurity / Incident Reporting': 'cybersecurity breach incident reporting',
+    'Health Information / HIPAA-type': 'HIPAA health information PHI',
+    'Patient Support Programs': 'patient support program hub services',
+    'Consent, Digital Tracking & Privacy Notices': 'consent tracking cookie banner privacy notice'
+  };
+
   try {
     const firms = config.selectedFirms;
-    const batchSize = 4; // Process 4 firms at a time to stay under 5/sec limit
+    const topics = config.selectedTopics;
 
-    for (let i = 0; i < firms.length; i += batchSize) {
-      const batch = firms.slice(i, i + batchSize);
+    // Create all search tasks: one per (firm, topic) combination
+    const allSearchTasks: Array<{ firm: typeof firms[0]; topic: typeof topics[0] }> = [];
+    for (const firm of firms) {
+      for (const topic of topics) {
+        allSearchTasks.push({ firm, topic });
+      }
+    }
 
-      const searchPromises = batch.map(async (firm) => {
+    console.log(`[Search] Total searches: ${allSearchTasks.length} (${firms.length} firms × ${topics.length} topics)`);
+
+    const batchSize = 4; // Process 4 searches at a time to stay under 5/sec limit
+    const resultsByFirm: Record<string, string[]> = {};
+
+    for (let i = 0; i < allSearchTasks.length; i += batchSize) {
+      const batch = allSearchTasks.slice(i, i + batchSize);
+
+      const searchPromises = batch.map(async ({ firm, topic }) => {
         try {
           const domain = new URL(firm.url).hostname;
-          // Include date range in search to help filter results
-          const startYear = config.startDate.split('-')[0];
-          const endYear = config.endDate.split('-')[0];
-          const query = `${topicList} new law regulation ${startYear} ${endYear}`;
+          const keywords = topicKeywords[topic.label] || topic.label.split('/')[0].trim();
+          const query = `${keywords} law regulation ${yearFilter}`;
 
-          const response = await fetch(`${API_BASE}/api/search`, {
+          const response = await fetch(`${API_BASE}${searchEndpoint}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               query: query,
-              include_domains: [domain]
+              include_domains: [domain],
+              start_date: config.startDate,
+              end_date: config.endDate
             })
           });
 
           if (response.ok) {
             const data: TavilyResponse = await response.json();
             if (data.results && data.results.length > 0) {
-              let firmResults = `\n### ${firm.name}\n`;
-              data.results.slice(0, 3).forEach((r: TavilyResult) => {
-                const content = r.content.length > 300 ? r.content.substring(0, 300) + '...' : r.content;
-                firmResults += `- **${r.title}**\n  ${r.url}\n  ${content}\n`;
+              // Take top 10 results for better coverage (same API cost)
+              const topResults = data.results.slice(0, 10);
+              const formattedResults = topResults.map(r => {
+                const title = r.title.length > 80 ? r.title.substring(0, 80) + '...' : r.title;
+                const content = r.content.length > 150 ? r.content.substring(0, 150) + '...' : r.content;
+                return `- [${topic.label}] **${title}**\n  ${r.url}\n  ${content}`;
               });
-              return firmResults;
+              return {
+                firmName: firm.name,
+                topicLabel: topic.label,
+                result: formattedResults.join('\n')
+              };
             }
           }
-          return "";
+          return null;
         } catch {
-          return "";
+          return null;
         }
       });
 
       const batchResults = await Promise.all(searchPromises);
-      searchResults += batchResults.filter(r => r).join("\n");
+
+      // Group results by firm
+      for (const result of batchResults) {
+        if (result) {
+          if (!resultsByFirm[result.firmName]) {
+            resultsByFirm[result.firmName] = [];
+          }
+          resultsByFirm[result.firmName].push(result.result);
+        }
+      }
 
       // Wait 1.5 seconds between batches to respect rate limit (5 req/sec)
-      if (i + batchSize < firms.length) {
+      if (i + batchSize < allSearchTasks.length) {
         await delay(1500);
+      }
+    }
+
+    // Format results grouped by firm
+    for (const [firmName, results] of Object.entries(resultsByFirm)) {
+      if (results.length > 0) {
+        searchResults += `\n### ${firmName}\n${results.join('\n')}\n`;
       }
     }
 
@@ -98,12 +158,13 @@ You are a legal research assistant for attorneys in pharmaceutical regulatory co
 ${searchResults || "No search results available."}
 
 **TASK:**
-Analyze the search results and organize findings BY LAW FIRM, highlighting new laws, regulations, and proposed legislation.
+Analyze the search results and organize findings BY LAW FIRM IN ALPHABETICAL ORDER, highlighting new laws, regulations, and proposed legislation.
 
 Law Firms: ${firmList}
 Legal Topics: ${topicList}
 Countries: ${countryList}
 Date Range of Interest: ${config.startDate} to ${config.endDate}
+Search Provider Used: ${searchProviderLabel}
 
 **OUTPUT FORMAT:**
 
@@ -140,21 +201,30 @@ Brief 2-3 sentence overview of key new/proposed laws identified across all firms
 [List all identified laws with clickable source links]
 
 **IMPORTANT:**
+- Present law firms in ALPHABETICAL ORDER (A-Z)
 - Start each firm section with the SPECIFIC LAWS/REGULATIONS they discuss
 - Put the source link at the END of each firm's commentary section
 - ONLY include laws explicitly mentioned in the search results
 - Use the EXACT source URLs from the search results
-- If a firm has no relevant commentaries, state "No relevant commentaries found for this firm"
+- If a firm has no relevant commentaries in the search results, SKIP that firm entirely - do not include any section for them
+- Only include firms that have actual commentary content to report
 `;
 
   try {
+    // Add 5 minute timeout to match server
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 300000);
+
     const response = await fetch(`${API_BASE}/api/generate`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ prompt })
+      body: JSON.stringify({ prompt }),
+      signal: controller.signal
     });
+
+    clearTimeout(timeoutId);
 
     if (!response.ok) {
       const errorData = await response.json();
@@ -183,6 +253,15 @@ Brief 2-3 sentence overview of key new/proposed laws identified across all firms
 };
 
 function generateWordHtml(markdown: string, config: ReportConfig): string {
+  // Debug: log the received searchProvider value
+  console.log('[Word Export] config.searchProvider:', config.searchProvider, 'type:', typeof config.searchProvider);
+
+  // Normalize search provider value
+  const searchProvider = (config.searchProvider || 'serper').toLowerCase().trim();
+  const searchProviderLabel = searchProvider === 'tavily' ? 'Tavily (AI Research)' : 'Serper (Google Search)';
+
+  console.log('[Word Export] Normalized provider:', searchProvider, '=> Label:', searchProviderLabel);
+
   // Convert markdown to proper HTML for Word
   let html = markdown;
 
@@ -263,6 +342,7 @@ function generateWordHtml(markdown: string, config: ReportConfig): string {
   <div class="header-info">
     <h1>Regulatory Intelligence Report</h1>
     <p><strong>Date Range:</strong> ${config.startDate} to ${config.endDate}</p>
+    <p><strong>Search Provider:</strong> ${searchProviderLabel}</p>
     <p><strong>Generated:</strong> ${new Date().toLocaleDateString()}</p>
   </div>
   <p style="margin: 10px 0;">${html}</p>

@@ -1,32 +1,4 @@
-import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
-import { createRequire } from 'module';
-
-const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-dotenv.config({ path: join(__dirname, '.env') });
-
-const app = express();
-app.use(cors());
-app.use(express.json({ limit: '10mb' }));
-
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const SERPER_API_KEY = process.env.SERPER_API_KEY;
-const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
-const MODEL_NAME = process.env.MODEL_NAME || 'claude-sonnet-4-20250514';
-
-console.log('API Keys loaded:', {
-  anthropic: ANTHROPIC_API_KEY ? 'Yes' : 'NO',
-  serper: SERPER_API_KEY ? 'Yes' : 'NO',
-  tavily: TAVILY_API_KEY ? 'Yes' : 'NO (optional)'
-});
+import pdfParse from 'pdf-parse/lib/pdf-parse.js';
 
 // Helper function to extract publication date from PDF
 async function extractDateFromPdf(url) {
@@ -202,8 +174,18 @@ async function filterByScrapedDate(results, startDate, endDate) {
 }
 
 // Serper search endpoint - IMPROVED v2
-// Changes: 1) Increased results to 20, 2) Filter out non-content pages, 3) Removed tbs date filter (rely on post-processing)
-app.post('/api/search', async (req, res) => {
+// Changes: 1) Increased results to 20, 2) Filter out non-content pages, 3) Removed tbs date filter
+export default async function handler(req, res) {
+  if (req.method !== 'POST') {
+    return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  const SERPER_API_KEY = process.env.SERPER_API_KEY;
+
+  if (!SERPER_API_KEY) {
+    return res.status(500).json({ error: 'SERPER_API_KEY not configured', results: [] });
+  }
+
   try {
     const { query, include_domains, start_date, end_date } = req.body;
 
@@ -293,109 +275,4 @@ app.post('/api/search', async (req, res) => {
     console.error('[Serper] Error:', error.message);
     res.status(500).json({ error: error.message, results: [] });
   }
-});
-
-// Tavily search endpoint
-app.post('/api/search-tavily', async (req, res) => {
-  if (!TAVILY_API_KEY) {
-    return res.status(500).json({ error: 'Tavily API key not configured', results: [] });
-  }
-
-  try {
-    const { query, include_domains, start_date, end_date } = req.body;
-
-    let days = 365;
-    if (start_date) {
-      const startMs = new Date(start_date).getTime();
-      days = Math.ceil((Date.now() - startMs) / (1000 * 60 * 60 * 24));
-    }
-
-    const tavilyRequest = {
-      api_key: TAVILY_API_KEY,
-      query: query,
-      search_depth: 'advanced',
-      include_answer: false,
-      include_raw_content: false,
-      max_results: 10,
-      days: days
-    };
-
-    if (include_domains && include_domains.length > 0) {
-      tavilyRequest.include_domains = include_domains;
-    }
-
-    const response = await fetch('https://api.tavily.com/search', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(tavilyRequest)
-    });
-
-    if (!response.ok) throw new Error(`Tavily API error: ${response.status}`);
-
-    const data = await response.json();
-    let filteredResults = data.results || [];
-
-    if (start_date && end_date) {
-      const startMs = new Date(start_date).getTime();
-      const endMs = new Date(end_date).getTime();
-      filteredResults = filteredResults.filter(item => {
-        if (!item.published_date) return true;
-        const pubMs = new Date(item.published_date).getTime();
-        return pubMs >= startMs && pubMs <= endMs;
-      });
-    }
-
-    let results = filteredResults.map(item => ({
-      title: item.title,
-      url: item.url,
-      content: item.content || '',
-      published_date: item.published_date || null
-    }));
-
-    if (start_date && end_date) {
-      results = await filterByScrapedDate(results, start_date, end_date);
-    }
-
-    res.json({ results });
-  } catch (error) {
-    console.error('[Tavily] Error:', error.message);
-    res.status(500).json({ error: error.message, results: [] });
-  }
-});
-
-// Claude API endpoint
-app.post('/api/generate', async (req, res) => {
-  try {
-    const { prompt } = req.body;
-
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': ANTHROPIC_API_KEY,
-        'anthropic-version': '2023-06-01'
-      },
-      body: JSON.stringify({
-        model: MODEL_NAME,
-        max_tokens: 16000,
-        messages: [{ role: 'user', content: prompt }]
-      })
-    });
-
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.error?.message || `API error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    res.json(data);
-  } catch (error) {
-    console.error('[Claude] Error:', error.message);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-const PORT = 3001;
-app.listen(PORT, () => {
-  console.log(`Backend server running on http://localhost:${PORT}`);
-});
+}

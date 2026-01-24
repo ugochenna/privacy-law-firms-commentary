@@ -26,6 +26,53 @@ export const LEGAL_TOPICS: Topic[] = [
   { id: LegalAreaId.AI, label: "AI / Automated Decision-Making", icon: "Bot" },
   { id: LegalAreaId.CYBERSECURITY, label: "Cybersecurity / Incident Reporting", icon: "Lock" },
   { id: LegalAreaId.HEALTH_INFO, label: "Health Information / HIPAA-type", icon: "HeartPulse" },
+  { id: LegalAreaId.PATIENT_SUPPORT, label: "Patient Support Programs", icon: "Users" },
+  { id: LegalAreaId.CONSENT_TRACKING, label: "Consent, Digital Tracking & Privacy Notices", icon: "Cookie" },
+];
+
+// Top 20 Largest Global Law Firms (by revenue/headcount from Am Law 100 & Global 200)
+export const TOP_20_FIRMS: LawFirm[] = [
+  { name: "Kirkland & Ellis", url: "https://www.kirkland.com/services/practices/intellectual-property/cybersecurity-data-privacy", category: "Top 20 Global Firms" },
+  { name: "Latham & Watkins", url: "https://www.lw.com/en/practices/artificial-intelligence", category: "Top 20 Global Firms" },
+  { name: "DLA Piper", url: "https://www.dlapiperdataprotection.com", category: "Top 20 Global Firms" },
+  { name: "Baker McKenzie", url: "https://resourcehub.bakermckenzie.com/en/resources/global-data-and-cyber-handbook", category: "Top 20 Global Firms" },
+  { name: "Skadden", url: "https://www.skadden.com/capabilities/practices/cybersecurity-and-data-privacy", category: "Top 20 Global Firms" },
+  { name: "Sidley Austin", url: "https://datamatters.sidley.com", category: "Top 20 Global Firms" },
+  { name: "Jones Day", url: "https://www.jonesday.com/en/practices/cybersecurity-privacy-and-data-protection", category: "Top 20 Global Firms" },
+  { name: "Hogan Lovells", url: "https://www.hldataprotection.com", category: "Top 20 Global Firms" },
+  { name: "White & Case", url: "https://www.whitecase.com/insight-our-thinking/ai-watch-global-regulatory-tracker-united-states", category: "Top 20 Global Firms" },
+  { name: "Gibson Dunn", url: "https://www.gibsondunn.com/practice/privacy-cybersecurity-and-data-innovation/", category: "Top 20 Global Firms" },
+  { name: "Ropes & Gray", url: "https://www.ropesdataphiles.com", category: "Top 20 Global Firms" },
+  { name: "Freshfields Bruckhaus Deringer", url: "https://www.freshfields.com/en/capabilities/practices/data-privacy-and-tech-regulation", category: "Top 20 Global Firms" },
+  { name: "Linklaters", url: "https://www.linklaters.com/en/insights", category: "Top 20 Global Firms" },
+  { name: "Cleary Gottlieb", url: "https://www.clearycyberwatch.com", category: "Top 20 Global Firms" },
+  { name: "Davis Polk", url: "https://www.davispolk.com/practices/litigation/cybersecurity", category: "Top 20 Global Firms" },
+  { name: "Covington & Burling", url: "https://www.insideprivacy.com", category: "Top 20 Global Firms" },
+  { name: "Norton Rose Fulbright", url: "https://www.dataprotectionreport.com", category: "Top 20 Global Firms" },
+  { name: "Morrison Foerster", url: "https://www.mofo.com/gdpr-european-privacy/gdpr-european-privacy-client-alerts", category: "Top 20 Global Firms" },
+  { name: "WilmerHale", url: "https://www.wilmerhale.com/en/solutions/cybersecurity-and-privacy", category: "Top 20 Global Firms" },
+  { name: "Mayer Brown", url: "https://www.mayerbrown.com/en/insights/resource-centers/cybersecurity-and-data-privacy-resource-center", category: "Top 20 Global Firms" },
+];
+
+// Patient Support Program Specialist Firms
+export const PATIENT_SUPPORT_FIRMS: LawFirm[] = [
+  { name: "Goodwin Procter", url: "https://www.goodwinlaw.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Bass, Berry & Sims", url: "https://www.bassberry.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Holland & Knight", url: "https://www.hklaw.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Sheppard Mullin", url: "https://www.sheppardmullin.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Quarles & Brady", url: "https://www.quarles.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Reed Smith", url: "https://www.reedsmith.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "King & Spalding", url: "https://www.kslaw.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Covington & Burling", url: "https://www.cov.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "White & Case", url: "https://www.whitecase.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Foley & Lardner", url: "https://www.foley.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Epstein Becker Green", url: "https://www.ebglaw.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "McDermott Will & Emery", url: "https://www.mwe.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Husch Blackwell", url: "https://www.huschblackwell.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Mintz", url: "https://www.mintz.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Ropes & Gray", url: "https://www.ropesgray.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Hyman, Phelps & McNamara", url: "https://hpm.com", category: "Patient Support Programs", specialty: ["patient_support"] },
+  { name: "Arnall Golden Gregory", url: "https://www.agg.com", category: "Patient Support Programs", specialty: ["patient_support"] },
 ];
 
 // Extracted from PDF tables

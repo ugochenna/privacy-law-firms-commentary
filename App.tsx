@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { FileText, Save, RefreshCw, Search, Download, FileSpreadsheet, ChevronDown, Check, FolderOpen } from 'lucide-react';
-import { LEGAL_TOPICS, LAW_FIRMS } from './constants';
-import { LawFirm, LegalAreaId, GeneratedReport, SavedReport } from './types';
+import { LEGAL_TOPICS, LAW_FIRMS, PATIENT_SUPPORT_FIRMS, TOP_20_FIRMS } from './constants';
+import { LawFirm, LegalAreaId, GeneratedReport, SavedReport, SearchProvider } from './types';
 import TopicCard from './components/TopicCard';
 import { generateLegalReport } from './services/claudeService';
 import { saveReport, isSupabaseConfigured } from './services/supabaseService';
@@ -11,9 +11,19 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
 function App() {
-  // Default: Start = Nov 1, 2025, End = Today
-  const [startDate, setStartDate] = useState<string>('2025-11-01');
-  const [endDate, setEndDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  // Default: 1 week ago to today
+  const getDefaultDates = () => {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(start.getDate() - 7);
+    return {
+      start: start.toISOString().split('T')[0],
+      end: end.toISOString().split('T')[0]
+    };
+  };
+  const defaultDates = getDefaultDates();
+  const [startDate, setStartDate] = useState<string>(defaultDates.start);
+  const [endDate, setEndDate] = useState<string>(defaultDates.end);
 
   // Date shortcut helper
   const setDateShortcut = (daysAgo: number) => {
@@ -23,9 +33,10 @@ function App() {
     setStartDate(start.toISOString().split('T')[0]);
     setEndDate(end.toISOString().split('T')[0]);
   };
-  const [selectedTopicIds, setSelectedTopicIds] = useState<string[]>([LegalAreaId.PRIVACY]); // Default one selected
-  const [selectedFirms, setSelectedFirms] = useState<LawFirm[]>([]);
+  const [selectedTopicIds, setSelectedTopicIds] = useState<string[]>([]); // No topics selected by default
+  const [selectedFirms, setSelectedFirms] = useState<LawFirm[]>([...TOP_20_FIRMS]); // Default to Top 20 Global Firms
   const [isFirmDropdownOpen, setIsFirmDropdownOpen] = useState(false);
+  const [searchProvider, setSearchProvider] = useState<SearchProvider>('tavily'); // Default to Tavily (AI Research)
   const [autoSave, setAutoSave] = useState(true);
   
   const [report, setReport] = useState<GeneratedReport | null>(null);
@@ -55,11 +66,61 @@ function App() {
     });
   };
 
+  // Combine all firms for display
+  const ALL_FIRMS = [...TOP_20_FIRMS, ...PATIENT_SUPPORT_FIRMS, ...LAW_FIRMS];
+
+  // Get unique categories for grouped firms
+  const PSP_CATEGORIES = [...new Set(PATIENT_SUPPORT_FIRMS.map(f => f.category))];
+  const TOP_20_CATEGORY = "Top 20 Global Firms";
+
   const handleSelectAllFirms = () => {
-    if (selectedFirms.length === LAW_FIRMS.length) {
+    if (selectedFirms.length === ALL_FIRMS.length) {
       setSelectedFirms([]);
     } else {
-      setSelectedFirms([...LAW_FIRMS]);
+      setSelectedFirms([...ALL_FIRMS]);
+    }
+  };
+
+  const handleSelectCategory = (category: string) => {
+    const categoryFirms = ALL_FIRMS.filter(f => f.category === category);
+    const allSelected = categoryFirms.every(f => selectedFirms.some(s => s.name === f.name));
+
+    if (allSelected) {
+      // Deselect all in this category
+      setSelectedFirms(prev => prev.filter(f => f.category !== category));
+    } else {
+      // Select all in this category
+      setSelectedFirms(prev => {
+        const existing = prev.filter(f => f.category !== category);
+        return [...existing, ...categoryFirms];
+      });
+    }
+  };
+
+  const handleSelectAllGeneral = () => {
+    const generalFirms = LAW_FIRMS;
+    const allSelected = generalFirms.every(f => selectedFirms.some(s => s.name === f.name));
+
+    if (allSelected) {
+      setSelectedFirms(prev => prev.filter(f => !generalFirms.some(g => g.name === f.name)));
+    } else {
+      setSelectedFirms(prev => {
+        const pspFirms = prev.filter(f => f.category);
+        return [...pspFirms, ...generalFirms];
+      });
+    }
+  };
+
+  const handleSelectTop20 = () => {
+    const allSelected = TOP_20_FIRMS.every(f => selectedFirms.some(s => s.name === f.name));
+
+    if (allSelected) {
+      setSelectedFirms(prev => prev.filter(f => f.category !== TOP_20_CATEGORY));
+    } else {
+      setSelectedFirms(prev => {
+        const otherFirms = prev.filter(f => f.category !== TOP_20_CATEGORY);
+        return [...otherFirms, ...TOP_20_FIRMS];
+      });
     }
   };
 
@@ -92,7 +153,8 @@ function App() {
         startDate,
         endDate,
         selectedFirms,
-        selectedTopics: selectedTopicsList
+        selectedTopics: selectedTopicsList,
+        searchProvider
       });
       setReport(result);
     } catch (err: any) {
@@ -181,7 +243,7 @@ function App() {
             </div>
             <div>
               <h1 className="text-xl font-bold text-gray-900">Law Firm Commentaries</h1>
-              <p className="text-xs text-gray-500 hidden sm:block">Privacy | AI | Cybersecurity | Health Information</p>
+              <p className="text-xs text-gray-500 hidden sm:block">Privacy | AI | Cybersecurity | Health Info | Patient Support</p>
             </div>
           </div>
         </div>
@@ -191,7 +253,7 @@ function App() {
         
         {/* Filters Section */}
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             
             {/* Date Range */}
             <div className="flex flex-col space-y-2">
@@ -263,13 +325,13 @@ function App() {
               </button>
               
               {isFirmDropdownOpen && (
-                <div id="firm-dropdown" className="absolute top-full left-0 right-0 mt-2 bg-white border border-gray-200 rounded-xl shadow-xl z-20 max-h-80 overflow-y-auto">
+                <div id="firm-dropdown" className="absolute top-full left-0 right-0 mt-2 bg-white border border-gray-200 rounded-xl shadow-xl z-20 max-h-96 overflow-y-auto">
                   <div className="p-3 sticky top-0 bg-white border-b border-gray-100 flex items-center justify-between z-10 shadow-sm">
                      <div className="flex items-center gap-2">
-                        <input 
+                        <input
                            type="checkbox"
                            id="select-all-firms"
-                           checked={selectedFirms.length === LAW_FIRMS.length && LAW_FIRMS.length > 0}
+                           checked={selectedFirms.length === ALL_FIRMS.length && ALL_FIRMS.length > 0}
                            onChange={handleSelectAllFirms}
                            className="w-4 h-4 text-fuchsia-600 rounded border-gray-300 focus:ring-fuchsia-500 cursor-pointer accent-fuchsia-600"
                         />
@@ -277,20 +339,111 @@ function App() {
                      </div>
                      <button onClick={() => setSelectedFirms([])} className="text-xs text-gray-500 hover:text-red-600 hover:underline px-2">Clear</button>
                   </div>
+
+                  {/* Top 20 Global Firms */}
+                  <div
+                    onClick={handleSelectTop20}
+                    className="flex items-center gap-2 px-4 py-2 bg-blue-50 border-y border-blue-200 cursor-pointer hover:bg-blue-100"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={TOP_20_FIRMS.every(f => selectedFirms.some(s => s.name === f.name))}
+                      onChange={() => {}}
+                      className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 pointer-events-none accent-blue-600"
+                    />
+                    <span className="text-sm font-bold text-blue-800">Top 20 Global Firms</span>
+                    <span className="text-xs text-blue-600">({TOP_20_FIRMS.length})</span>
+                  </div>
+                  {TOP_20_FIRMS.map((firm) => {
+                    const isSelected = selectedFirms.some(f => f.name === firm.name);
+                    return (
+                      <div
+                        key={firm.name}
+                        onClick={() => toggleFirm(firm)}
+                        className="flex items-center gap-3 px-4 py-2 pl-8 cursor-pointer hover:bg-gray-100 transition-colors border-b border-gray-100 bg-white"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => {}}
+                          className="w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500 pointer-events-none accent-blue-600"
+                        />
+                        <p className="text-sm font-medium text-black">{firm.name}</p>
+                      </div>
+                    );
+                  })}
+
+                  {/* Patient Support Program Firms - Grouped by Category */}
+                  {PSP_CATEGORIES.map((category) => {
+                    const categoryFirms = PATIENT_SUPPORT_FIRMS.filter(f => f.category === category);
+                    const allCategorySelected = categoryFirms.every(f => selectedFirms.some(s => s.name === f.name));
+                    return (
+                      <div key={category}>
+                        {/* Category Header */}
+                        <div
+                          onClick={() => handleSelectCategory(category!)}
+                          className="flex items-center gap-2 px-4 py-2 bg-purple-50 border-y border-purple-200 cursor-pointer hover:bg-purple-100"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={allCategorySelected}
+                            onChange={() => {}}
+                            className="w-4 h-4 text-purple-600 rounded border-gray-300 focus:ring-purple-500 pointer-events-none accent-purple-600"
+                          />
+                          <span className="text-sm font-bold text-purple-800">{category}</span>
+                          <span className="text-xs text-purple-600">({categoryFirms.length})</span>
+                        </div>
+                        {/* Firms in this category */}
+                        {categoryFirms.map((firm) => {
+                          const isSelected = selectedFirms.some(f => f.name === firm.name);
+                          return (
+                            <div
+                              key={firm.name}
+                              onClick={() => toggleFirm(firm)}
+                              className="flex items-center gap-3 px-4 py-2 pl-8 cursor-pointer hover:bg-gray-100 transition-colors border-b border-gray-100 bg-white"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => {}}
+                                className="w-4 h-4 text-fuchsia-600 rounded border-gray-300 focus:ring-fuchsia-500 pointer-events-none accent-fuchsia-600"
+                              />
+                              <p className="text-sm font-medium text-black">{firm.name}</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })}
+
+                  {/* General Law Firms Header */}
+                  <div
+                    onClick={handleSelectAllGeneral}
+                    className="flex items-center gap-2 px-4 py-2 bg-gray-100 border-y border-gray-300 cursor-pointer hover:bg-gray-200"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={LAW_FIRMS.every(f => selectedFirms.some(s => s.name === f.name))}
+                      onChange={() => {}}
+                      className="w-4 h-4 text-gray-600 rounded border-gray-300 focus:ring-gray-500 pointer-events-none accent-gray-600"
+                    />
+                    <span className="text-sm font-bold text-gray-800">General / Privacy Law Firms</span>
+                    <span className="text-xs text-gray-600">({LAW_FIRMS.length})</span>
+                  </div>
+
+                  {/* General Law Firms */}
                   {LAW_FIRMS.map((firm) => {
                     const isSelected = selectedFirms.some(f => f.name === firm.name);
                     return (
                       <div
                         key={firm.name}
                         onClick={() => toggleFirm(firm)}
-                        className={`
-                          flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-100 transition-colors border-b border-gray-100 last:border-0 bg-white
-                        `}
+                        className="flex items-center gap-3 px-4 py-2 cursor-pointer hover:bg-gray-100 transition-colors border-b border-gray-100 bg-white"
                       >
                          <input
                             type="checkbox"
                             checked={isSelected}
-                            onChange={() => {}} // handled by parent onClick
+                            onChange={() => {}}
                             className="w-4 h-4 text-fuchsia-600 rounded border-gray-300 focus:ring-fuchsia-500 pointer-events-none accent-fuchsia-600"
                         />
                         <div>
@@ -311,6 +464,24 @@ function App() {
                   </div>
                 </div>
               )}
+            </div>
+
+            {/* Search Provider Dropdown */}
+            <div className="flex flex-col space-y-2">
+              <label className="text-sm font-semibold text-gray-900 uppercase tracking-wide">Search Provider</label>
+              <select
+                value={searchProvider}
+                onChange={(e) => setSearchProvider(e.target.value as SearchProvider)}
+                className="w-full border-2 border-gray-200 rounded-lg p-3 bg-white hover:border-gray-300 transition-colors text-gray-900 font-medium focus:outline-none focus:border-fuchsia-500"
+              >
+                <option value="serper">Serper (Google Search)</option>
+                <option value="tavily">Tavily (AI Research)</option>
+              </select>
+              <p className="text-xs text-gray-500">
+                {searchProvider === 'serper'
+                  ? 'Fast Google-based search with date filtering'
+                  : 'AI-optimized search with full content extraction'}
+              </p>
             </div>
           </div>
         </div>

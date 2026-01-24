@@ -1,6 +1,6 @@
 import React from 'react';
 import { Topic } from '../types';
-import { Shield, Bot, Lock, HeartPulse } from 'lucide-react';
+import { Shield, Bot, Lock, HeartPulse, Users } from 'lucide-react';
 
 interface TopicCardProps {
   topic: Topic;
@@ -15,6 +15,7 @@ const TopicCard: React.FC<TopicCardProps> = ({ topic, isSelected, onToggle }) =>
       case 'Bot': return <Bot className="w-5 h-5" />;
       case 'Lock': return <Lock className="w-5 h-5" />;
       case 'HeartPulse': return <HeartPulse className="w-5 h-5" />;
+      case 'Users': return <Users className="w-5 h-5" />;
       default: return <Shield className="w-5 h-5" />;
     }
   };

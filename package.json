@@ -17,6 +17,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "lucide-react": "^0.556.0",
+    "pdf-parse": "^2.4.5",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",
     "react-markdown": "^10.1.0",

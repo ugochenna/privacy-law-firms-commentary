@@ -84,7 +84,7 @@ async function extractDateFromUrl(url) {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 5000);
+    const timeout = setTimeout(() => controller.abort(), 3000);  // Reduced for Vercel serverless
 
     const response = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; LegalResearchBot/1.0)' },
@@ -199,38 +199,47 @@ async function extractDateFromUrl(url) {
   }
 }
 
-// Filter results by scraping HTML for publication dates
+// Filter results by scraping HTML for publication dates - PARALLEL VERSION for Vercel
 async function filterByScrapedDate(results, startDate, endDate, strictMode = false) {
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
-  const filteredResults = [];
 
-  for (const item of results) {
-    if (item.published_date) {
-      const pubMs = new Date(item.published_date).getTime();
-      if (!isNaN(pubMs)) {
-        if (pubMs >= startMs && pubMs <= endMs) filteredResults.push(item);
-        continue;
+  // Process all URLs in parallel instead of sequentially (fixes Vercel timeout)
+  const processedResults = await Promise.all(
+    results.map(async (item) => {
+      // If item already has a valid published_date, check it
+      if (item.published_date) {
+        const pubMs = new Date(item.published_date).getTime();
+        if (!isNaN(pubMs)) {
+          if (pubMs >= startMs && pubMs <= endMs) {
+            return item;
+          }
+          return null; // Date exists but outside range
+        }
       }
-    }
 
-    const scrapedDate = await extractDateFromUrl(item.url);
-    if (scrapedDate) {
-      const pubMs = scrapedDate.getTime();
-      item.published_date = scrapedDate.toISOString().split('T')[0];
-      item.date_source = 'scraped';
-      if (pubMs >= startMs && pubMs <= endMs) {
-        filteredResults.push(item);
+      // Try to scrape the date from the URL
+      try {
+        const scrapedDate = await extractDateFromUrl(item.url);
+        if (scrapedDate) {
+          const pubMs = scrapedDate.getTime();
+          item.published_date = scrapedDate.toISOString().split('T')[0];
+          item.date_source = 'scraped';
+          if (pubMs >= startMs && pubMs <= endMs) {
+            return item;
+          }
+          return null; // Scraped date outside range
+        }
+      } catch (e) {
+        // Scraping failed - continue
       }
-    } else {
+
       // No date found - include only if not in strict mode
-      if (!strictMode) {
-        filteredResults.push(item);
-      }
-    }
-  }
+      return strictMode ? null : item;
+    })
+  );
 
-  return filteredResults;
+  return processedResults.filter(Boolean);
 }
 
 // Serper search endpoint - IMPROVED v2

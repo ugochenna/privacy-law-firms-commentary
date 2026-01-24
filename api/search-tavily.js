@@ -117,7 +117,7 @@ async function extractDateFromUrl(url) {
 
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 3000);  // Reduced for Vercel serverless
+    const timeout = setTimeout(() => controller.abort(), 8000);  // Increased for Vercel latency
 
     const response = await fetch(url, {
       headers: {
@@ -311,6 +311,9 @@ export default async function handler(req, res) {
   try {
     const { query, include_domains, start_date, end_date, strict_date_filter } = req.body;
 
+    // Debug logging for Vercel
+    console.log('[Tavily] Request received:', { query, include_domains, start_date, end_date, strict_date_filter });
+
     let days = 365;
     if (start_date) {
       const startMs = new Date(start_date).getTime();
@@ -367,8 +370,20 @@ export default async function handler(req, res) {
       published_date: item.published_date || null
     }));
 
+    // Final date filtering by scraping actual pages - with timeout fallback
     if (start_date && end_date) {
-      results = await filterByScrapedDate(results, start_date, end_date, strict_date_filter);
+      const preScrapedResults = [...results]; // Keep a copy in case scraping times out
+      try {
+        const scrapePromise = filterByScrapedDate(results, start_date, end_date, strict_date_filter);
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Scrape timeout')), 25000)
+        );
+        results = await Promise.race([scrapePromise, timeoutPromise]);
+      } catch (e) {
+        console.log('[Tavily] Scraping timed out, returning API-filtered results');
+        // On timeout, return results filtered only by API dates (not strict scraped filtering)
+        results = preScrapedResults;
+      }
     }
 
     console.log('[Tavily] Final results:', results.length, strict_date_filter ? '(strict mode)' : '');

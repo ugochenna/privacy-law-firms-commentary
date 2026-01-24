@@ -32,10 +32,29 @@ async function extractDateFromPdf(url) {
     if (pdfData.text) {
       const textSample = pdfData.text.substring(0, 2000);
       const months = 'January|February|March|April|May|June|July|August|September|October|November|December';
-      const monthDayYear = new RegExp(`(${months})\\s+(\\d{1,2}),?\\s+(202\\d)`, 'i');
+      const monthsAbbrev = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
+
+      // "July 23, 2025" format (supports 2000-2039)
+      const monthDayYear = new RegExp(`(${months})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i');
       const match = textSample.match(monthDayYear);
       if (match) {
         const date = new Date(`${match[1]} ${match[2]}, ${match[3]}`);
+        if (!isNaN(date.getTime())) return date;
+      }
+
+      // "23 July 2025" format (supports 2000-2039)
+      const dayMonthYear = new RegExp(`(\\d{1,2})\\s+(${months})\\s+(20[0-3]\\d)`, 'i');
+      const dayMonthMatch = textSample.match(dayMonthYear);
+      if (dayMonthMatch) {
+        const date = new Date(`${dayMonthMatch[2]} ${dayMonthMatch[1]}, ${dayMonthMatch[3]}`);
+        if (!isNaN(date.getTime())) return date;
+      }
+
+      // Abbreviated months: "Jul 23, 2025" (supports 2000-2039)
+      const abbrevMonthDayYear = new RegExp(`(${monthsAbbrev})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i');
+      const abbrevMatch = textSample.match(abbrevMonthDayYear);
+      if (abbrevMatch) {
+        const date = new Date(`${abbrevMatch[1]} ${abbrevMatch[2]}, ${abbrevMatch[3]}`);
         if (!isNaN(date.getTime())) return date;
       }
     }
@@ -132,11 +151,46 @@ async function extractDateFromUrl(url) {
       if (!isNaN(date.getTime())) return date;
     }
 
-    // URL date pattern
+    // URL date patterns
+    // Try YYYY/MM/DD first
     const urlDateMatch = url.match(/\/(\d{4})[-\/](\d{2})[-\/](\d{2})\//);
     if (urlDateMatch) {
       const date = new Date(`${urlDateMatch[1]}-${urlDateMatch[2]}-${urlDateMatch[3]}`);
       if (!isNaN(date.getTime())) return date;
+    }
+    // Try YYYY/MM (without day) - common in law firm URLs like /2018/05/article-name
+    const urlYearMonthMatch = url.match(/\/(\d{4})\/(\d{2})\/[a-zA-Z]/);
+    if (urlYearMonthMatch) {
+      const date = new Date(`${urlYearMonthMatch[1]}-${urlYearMonthMatch[2]}-15`);
+      if (!isNaN(date.getTime())) return date;
+    }
+
+    // Text-based dates in HTML
+    const months = 'January|February|March|April|May|June|July|August|September|October|November|December';
+    const monthsAbbrev = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
+    const textDatePatterns = [
+      new RegExp(`(${months})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i'),
+      new RegExp(`(\\d{1,2})\\s+(${months})\\s+(20[0-3]\\d)`, 'i'),
+      new RegExp(`(${monthsAbbrev})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i'),
+      new RegExp(`(\\d{1,2})[-\\s](${monthsAbbrev})[-\\s](20[0-3]\\d)`, 'i'),
+      /\b(20[0-3]\d)[-\/](0[1-9]|1[0-2])[-\/](0[1-9]|[12]\d|3[01])\b/,
+    ];
+
+    for (const pattern of textDatePatterns) {
+      const match = html.match(pattern);
+      if (match) {
+        let dateStr;
+        const patternStr = pattern.source;
+        if (patternStr.startsWith(`(${months})`) || patternStr.startsWith(`(${monthsAbbrev})`)) {
+          dateStr = `${match[1]} ${match[2]}, ${match[3]}`;
+        } else if (patternStr.includes(`(${months})`) || patternStr.includes(`(${monthsAbbrev})`)) {
+          dateStr = `${match[2]} ${match[1]}, ${match[3]}`;
+        } else {
+          dateStr = match[0];
+        }
+        const date = new Date(dateStr);
+        if (!isNaN(date.getTime())) return date;
+      }
     }
 
     return null;
@@ -146,7 +200,7 @@ async function extractDateFromUrl(url) {
 }
 
 // Filter results by scraping HTML for publication dates
-async function filterByScrapedDate(results, startDate, endDate) {
+async function filterByScrapedDate(results, startDate, endDate, strictMode = false) {
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
   const filteredResults = [];
@@ -164,9 +218,15 @@ async function filterByScrapedDate(results, startDate, endDate) {
     if (scrapedDate) {
       const pubMs = scrapedDate.getTime();
       item.published_date = scrapedDate.toISOString().split('T')[0];
-      if (pubMs >= startMs && pubMs <= endMs) filteredResults.push(item);
+      item.date_source = 'scraped';
+      if (pubMs >= startMs && pubMs <= endMs) {
+        filteredResults.push(item);
+      }
     } else {
-      filteredResults.push(item);
+      // No date found - include only if not in strict mode
+      if (!strictMode) {
+        filteredResults.push(item);
+      }
     }
   }
 
@@ -187,7 +247,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { query, include_domains, start_date, end_date } = req.body;
+    const { query, include_domains, start_date, end_date, strict_date_filter } = req.body;
 
     // Build query with site: operator
     let searchQuery = query;
@@ -265,10 +325,10 @@ export default async function handler(req, res) {
 
     // Final date filtering by scraping actual pages
     if (start_date && end_date) {
-      results = await filterByScrapedDate(results, start_date, end_date);
+      results = await filterByScrapedDate(results, start_date, end_date, strict_date_filter);
     }
 
-    console.log('[Serper] Final results:', results.length);
+    console.log('[Serper] Final results:', results.length, strict_date_filter ? '(strict mode)' : '');
 
     res.json({ results });
   } catch (error) {

@@ -89,9 +89,10 @@ export async function extractDateFromPdf(url) {
     if (pdfData.text) {
       const textSample = pdfData.text.substring(0, 2000); // Check first 2000 chars
       const months = 'January|February|March|April|May|June|July|August|September|October|November|December';
+      const monthsAbbrev = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
 
-      // "July 23, 2025" format
-      const monthDayYear = new RegExp(`(${months})\\s+(\\d{1,2}),?\\s+(202\\d)`, 'i');
+      // "July 23, 2025" format (supports 2000-2039)
+      const monthDayYear = new RegExp(`(${months})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i');
       const match = textSample.match(monthDayYear);
       if (match) {
         const date = new Date(`${match[1]} ${match[2]}, ${match[3]}`);
@@ -101,8 +102,30 @@ export async function extractDateFromPdf(url) {
         }
       }
 
-      // ISO format
-      const isoMatch = textSample.match(/\b(202\d)[-\/](0[1-9]|1[0-2])[-\/](0[1-9]|[12]\d|3[01])\b/);
+      // "23 July 2025" format (supports 2000-2039)
+      const dayMonthYear = new RegExp(`(\\d{1,2})\\s+(${months})\\s+(20[0-3]\\d)`, 'i');
+      const dayMonthMatch = textSample.match(dayMonthYear);
+      if (dayMonthMatch) {
+        const date = new Date(`${dayMonthMatch[2]} ${dayMonthMatch[1]}, ${dayMonthMatch[3]}`);
+        if (!isNaN(date.getTime())) {
+          console.log(`[PDF] Found text date: ${date.toISOString().split('T')[0]} for ${url}`);
+          return date;
+        }
+      }
+
+      // Abbreviated months: "Jul 23, 2025" or "23 Jul 2025" (supports 2000-2039)
+      const abbrevMonthDayYear = new RegExp(`(${monthsAbbrev})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i');
+      const abbrevMatch = textSample.match(abbrevMonthDayYear);
+      if (abbrevMatch) {
+        const date = new Date(`${abbrevMatch[1]} ${abbrevMatch[2]}, ${abbrevMatch[3]}`);
+        if (!isNaN(date.getTime())) {
+          console.log(`[PDF] Found text date: ${date.toISOString().split('T')[0]} for ${url}`);
+          return date;
+        }
+      }
+
+      // ISO format (supports 2000-2039)
+      const isoMatch = textSample.match(/\b(20[0-3]\d)[-\/](0[1-9]|1[0-2])[-\/](0[1-9]|[12]\d|3[01])\b/);
       if (isoMatch) {
         const date = new Date(isoMatch[0]);
         if (!isNaN(date.getTime())) {
@@ -249,6 +272,7 @@ export async function extractDateFromUrl(url) {
     }
 
     // 4. Common date patterns in URL
+    // Try YYYY/MM/DD first
     const urlDateMatch = url.match(/\/(\d{4})[-\/](\d{2})[-\/](\d{2})\//);
     if (urlDateMatch) {
       const date = new Date(`${urlDateMatch[1]}-${urlDateMatch[2]}-${urlDateMatch[3]}`);
@@ -256,35 +280,78 @@ export async function extractDateFromUrl(url) {
         return date;
       }
     }
+    // Try YYYY/MM (without day) - common in law firm URLs like /2018/05/article-name
+    const urlYearMonthMatch = url.match(/\/(\d{4})\/(\d{2})\/[a-zA-Z]/);
+    if (urlYearMonthMatch) {
+      const date = new Date(`${urlYearMonthMatch[1]}-${urlYearMonthMatch[2]}-15`); // Default to mid-month
+      if (!isNaN(date.getTime())) {
+        console.log(`[URL] Found year/month in URL: ${date.toISOString().split('T')[0]} for ${url}`);
+        return date;
+      }
+    }
 
     // 5. Text-based dates in HTML (for sites that display dates as plain text)
     const months = 'January|February|March|April|May|June|July|August|September|October|November|December';
+    const monthsAbbrev = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
     const textDatePatterns = [
-      // "July 23, 2025" or "July 23 2025"
-      new RegExp(`(${months})\\s+(\\d{1,2}),?\\s+(202\\d)`, 'i'),
-      // "23 July 2025"
-      new RegExp(`(\\d{1,2})\\s+(${months})\\s+(202\\d)`, 'i'),
-      // "2025-07-23" or "2025/07/23" in visible text
-      /\b(202\d)[-\/](0[1-9]|1[0-2])[-\/](0[1-9]|[12]\d|3[01])\b/,
-      // "07/23/2025" US format
-      /(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])\/(202\d)/,
+      // "July 23, 2025" or "July 23 2025" (supports 2000-2039)
+      new RegExp(`(${months})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i'),
+      // "23 July 2025" (supports 2000-2039)
+      new RegExp(`(\\d{1,2})\\s+(${months})\\s+(20[0-3]\\d)`, 'i'),
+      // "Jul 23, 2025" or "Jul 23 2025" - abbreviated months (supports 2000-2039)
+      new RegExp(`(${monthsAbbrev})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i'),
+      // "23 Jul 2025" or "23-Jul-2025" - abbreviated months (supports 2000-2039)
+      new RegExp(`(\\d{1,2})[-\\s](${monthsAbbrev})[-\\s](20[0-3]\\d)`, 'i'),
+      // "2025-07-23" or "2025/07/23" in visible text (supports 2000-2039)
+      /\b(20[0-3]\d)[-\/](0[1-9]|1[0-2])[-\/](0[1-9]|[12]\d|3[01])\b/,
+      // "2025.07.23" dot-separated format (supports 2000-2039)
+      /\b(20[0-3]\d)\.(0[1-9]|1[0-2])\.(0[1-9]|[12]\d|3[01])\b/,
+      // "07/23/2025" US format (supports 2000-2039)
+      /(0[1-9]|1[0-2])\/(0[1-9]|[12]\d|3[01])\/(20[0-3]\d)/,
+      // "23/07/2025" European DD/MM/YYYY format (supports 2000-2039)
+      /(0[1-9]|[12]\d|3[01])\/(0[1-9]|1[0-2])\/(20[0-3]\d)/,
+      // "Last review date: 31 December 2024" or "Published: January 15, 2025" - prefixed patterns
+      new RegExp(`(?:date|published|posted|updated|review)[:\\s]+(?:(\\d{1,2})\\s+)?(${months})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i'),
+      new RegExp(`(?:date|published|posted|updated|review)[:\\s]+(\\d{1,2})\\s+(${months})\\s+(20[0-3]\\d)`, 'i'),
     ];
 
     for (const pattern of textDatePatterns) {
       const match = html.match(pattern);
       if (match) {
         let dateStr;
-        if (pattern.source.startsWith(`(${months})`)) {
-          // "Month Day, Year" format
+        const patternStr = pattern.source;
+
+        // Check pattern type based on its structure
+        if (patternStr.startsWith(`(${months})`) || patternStr.startsWith(`(${monthsAbbrev})`)) {
+          // "Month Day, Year" or "Jul 23, 2025" format
           dateStr = `${match[1]} ${match[2]}, ${match[3]}`;
-        } else if (pattern.source.includes(`(${months})`)) {
-          // "Day Month Year" format
+        } else if (patternStr.includes('date|published|posted|updated|review')) {
+          // Prefixed patterns like "Last review date: 31 December 2024"
+          // These have variable capture groups
+          if (match[4]) {
+            // Format: prefix + day + month + year (4 groups)
+            dateStr = `${match[2]} ${match[1] || match[3]}, ${match[4]}`;
+          } else {
+            // Format: prefix + day + month + year (3 groups)
+            dateStr = `${match[2]} ${match[1]}, ${match[3]}`;
+          }
+        } else if (patternStr.includes(`(${months})`) || patternStr.includes(`(${monthsAbbrev})`)) {
+          // "Day Month Year" or "23-Jul-2025" format
           dateStr = `${match[2]} ${match[1]}, ${match[3]}`;
+        } else if (patternStr.includes('\\.')) {
+          // Dot-separated: 2025.07.23
+          dateStr = `${match[1]}-${match[2]}-${match[3]}`;
         } else if (match[0].includes('/') && match[3]) {
-          // MM/DD/YYYY format
-          dateStr = `${match[3]}-${match[1]}-${match[2]}`;
+          // Slash formats: MM/DD/YYYY or DD/MM/YYYY
+          // Try US format first (MM/DD/YYYY)
+          const usDate = new Date(`${match[3]}-${match[1]}-${match[2]}`);
+          if (!isNaN(usDate.getTime()) && usDate.getDate() === parseInt(match[2])) {
+            return usDate;
+          }
+          // Try European format (DD/MM/YYYY)
+          dateStr = `${match[3]}-${match[2]}-${match[1]}`;
         } else {
-          // ISO format
+          // ISO format (YYYY-MM-DD or YYYY/MM/DD)
           dateStr = match[0];
         }
         const date = new Date(dateStr);
@@ -305,7 +372,7 @@ export async function extractDateFromUrl(url) {
       for (const match of matches) {
         const potentialDate = match[1].trim();
         const date = new Date(potentialDate);
-        if (!isNaN(date.getTime()) && date.getFullYear() >= 2020) {
+        if (!isNaN(date.getTime()) && date.getFullYear() >= 2000) {
           return date;
         }
       }

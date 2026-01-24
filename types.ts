@@ -20,6 +20,8 @@ export interface ReportConfig {
   selectedFirms: LawFirm[];
   selectedTopics: Topic[];
   searchProvider: SearchProvider;
+  strictDateFilter?: boolean;  // When true, exclude articles with no detectable publication date
+  abortSignal?: AbortSignal;   // For cancelling the search
 }
 
 export interface GeneratedReport {

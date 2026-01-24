@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { FileText, Save, RefreshCw, Search, Download, FileSpreadsheet, ChevronDown, Check, FolderOpen } from 'lucide-react';
 import { LEGAL_TOPICS, LAW_FIRMS, PATIENT_SUPPORT_FIRMS, TOP_20_FIRMS } from './constants';
 import { LawFirm, LegalAreaId, GeneratedReport, SavedReport, SearchProvider } from './types';
@@ -38,10 +38,13 @@ function App() {
   const [isFirmDropdownOpen, setIsFirmDropdownOpen] = useState(false);
   const [searchProvider, setSearchProvider] = useState<SearchProvider>('tavily'); // Default to Tavily (AI Research)
   const [autoSave, setAutoSave] = useState(true);
+  const [strictDateFilter, setStrictDateFilter] = useState(true); // When true, exclude articles with no detectable date
   
   const [report, setReport] = useState<GeneratedReport | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reportGeneratedAt, setReportGeneratedAt] = useState<Date | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   // Reports panel and save modal state
   const [isReportsPanelOpen, setIsReportsPanelOpen] = useState(false);
@@ -125,11 +128,27 @@ function App() {
   };
 
   const handleReset = () => {
+    // Reset to default settings
+    const defaults = getDefaultDates();
+    setStartDate(defaults.start);
+    setEndDate(defaults.end);
     setSelectedTopicIds([]);
-    setSelectedFirms([]);
+    setSelectedFirms([...TOP_20_FIRMS]);
+    setSearchProvider('tavily');
+    setStrictDateFilter(true);
     setReport(null);
     setError(null);
     setCurrentReportId(null);
+    setReportGeneratedAt(null);
+  };
+
+  const handleAbort = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setLoading(false);
+      setError('Search cancelled by user.');
+    }
   };
 
   const handleIdentifyLaws = async () => {
@@ -142,10 +161,14 @@ function App() {
       return;
     }
 
+    // Create a new abort controller for this search
+    abortControllerRef.current = new AbortController();
+
     setLoading(true);
     setError(null);
     setReport(null);
     setCurrentReportId(null);
+    setReportGeneratedAt(null);
 
     try {
       const selectedTopicsList = LEGAL_TOPICS.filter(t => selectedTopicIds.includes(t.id));
@@ -154,25 +177,61 @@ function App() {
         endDate,
         selectedFirms,
         selectedTopics: selectedTopicsList,
-        searchProvider
+        searchProvider,
+        strictDateFilter,
+        abortSignal: abortControllerRef.current.signal
       });
       setReport(result);
+      setReportGeneratedAt(new Date());
+
+      // Auto-save if enabled and Supabase is configured
+      if (autoSave && isSupabaseConfigured()) {
+        const reportName = `${selectedTopicsList.map(t => t.label).join(', ')} Report - ${startDate} to ${endDate}`;
+        const savedReport = await saveReport(
+          result,
+          reportName,
+          startDate,
+          endDate,
+          selectedFirms.map(f => f.name),
+          selectedTopicIds
+        );
+        if (savedReport) {
+          setCurrentReportId(savedReport.id);
+        }
+      }
     } catch (err: any) {
-      setError("Failed to generate report. Please try again. " + (err.message || ""));
+      if (err.name === 'AbortError') {
+        setError('Search cancelled by user.');
+      } else {
+        setError("Failed to generate report. Please try again. " + (err.message || ""));
+      }
     } finally {
       setLoading(false);
+      abortControllerRef.current = null;
     }
   };
 
   const handleDownloadWord = () => {
     if (!report) return;
-    const blob = new Blob(['\ufeff', report.htmlContent], {
+
+    // Format timestamp for filename (YYYY-MM-DD_HH-MM)
+    const timestamp = reportGeneratedAt || new Date();
+    const timestampStr = timestamp.toISOString().slice(0, 16).replace('T', '_').replace(':', '-');
+
+    // Add timestamp to the HTML content header
+    const timestampLabel = timestamp.toLocaleString();
+    const htmlWithTimestamp = report.htmlContent.replace(
+      '<p><strong>Generated:</strong>',
+      `<p><strong>Generated:</strong> ${timestampLabel}</p>\n    <p><strong>Report Created:</strong>`
+    );
+
+    const blob = new Blob(['\ufeff', htmlWithTimestamp], {
       type: 'application/msword'
     });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `Legal_Report_${startDate}_${endDate}.doc`;
+    link.download = `Legal_Report_${startDate}_${endDate}_${timestampStr}.doc`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -506,20 +565,39 @@ function App() {
 
         {/* Action Bar */}
         <div className="flex flex-col sm:flex-row items-center justify-between gap-4 py-4">
-          <div className="flex items-center gap-3">
-            <button 
-              onClick={() => setAutoSave(!autoSave)}
-              className={`
-                relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none
-                ${autoSave ? 'bg-fuchsia-600' : 'bg-gray-200'}
-              `}
-            >
-              <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${autoSave ? 'translate-x-6' : 'translate-x-1'}`} />
-            </button>
-            <span className="text-sm font-medium text-fuchsia-700 flex items-center gap-1">
-              {autoSave ? <Save className="w-4 h-4" /> : null}
-              Auto-Save
-            </span>
+          <div className="flex items-center gap-6">
+            {/* Auto-Save toggle */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setAutoSave(!autoSave)}
+                className={`
+                  relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none
+                  ${autoSave ? 'bg-fuchsia-600' : 'bg-gray-200'}
+                `}
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${autoSave ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+              <span className="text-sm font-medium text-fuchsia-700 flex items-center gap-1">
+                {autoSave ? <Save className="w-4 h-4" /> : null}
+                Auto-Save
+              </span>
+            </div>
+            {/* Strict Date Filter toggle */}
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => setStrictDateFilter(!strictDateFilter)}
+                className={`
+                  relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none
+                  ${strictDateFilter ? 'bg-blue-600' : 'bg-gray-200'}
+                `}
+                title="When enabled, excludes articles with no detectable publication date"
+              >
+                <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${strictDateFilter ? 'translate-x-6' : 'translate-x-1'}`} />
+              </button>
+              <span className="text-sm font-medium text-blue-700" title="Exclude articles with no detectable publication date">
+                Strict Dates
+              </span>
+            </div>
           </div>
 
           <div className="flex gap-4 w-full sm:w-auto">
@@ -530,23 +608,25 @@ function App() {
               <RefreshCw className="w-5 h-5" />
               Reset
             </button>
-            <button 
-              onClick={handleIdentifyLaws}
-              disabled={loading}
-              className="px-8 py-3 rounded-lg bg-gray-500 hover:bg-gray-600 text-white font-semibold shadow-md transition-all transform active:scale-95 flex items-center gap-2 justify-center w-full sm:w-auto disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {loading ? (
-                <>
-                  <div className="animate-spin h-5 w-5 border-2 border-white border-t-transparent rounded-full"></div>
-                  Scanning...
-                </>
-              ) : (
-                <>
-                  <Search className="w-5 h-5" />
-                  Find Commentaries
-                </>
-              )}
-            </button>
+            {loading ? (
+              <button
+                onClick={handleAbort}
+                className="px-8 py-3 rounded-lg bg-red-500 hover:bg-red-600 text-white font-semibold shadow-md transition-all transform active:scale-95 flex items-center gap-2 justify-center w-full sm:w-auto"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                </svg>
+                Abort Search
+              </button>
+            ) : (
+              <button
+                onClick={handleIdentifyLaws}
+                className="px-8 py-3 rounded-lg bg-gray-500 hover:bg-gray-600 text-white font-semibold shadow-md transition-all transform active:scale-95 flex items-center gap-2 justify-center w-full sm:w-auto"
+              >
+                <Search className="w-5 h-5" />
+                Find Commentaries
+              </button>
+            )}
           </div>
         </div>
 
@@ -574,20 +654,18 @@ function App() {
 
           {loading && (
             <div className="flex-1 flex flex-col items-center justify-center p-12 text-center space-y-6">
-              <div className="animate-pulse flex space-x-4">
-                 <div className="rounded-full bg-slate-200 h-10 w-10"></div>
-                 <div className="flex-1 space-y-6 py-1">
-                   <div className="h-2 bg-slate-200 rounded w-64"></div>
-                   <div className="space-y-3">
-                     <div className="grid grid-cols-3 gap-4">
-                       <div className="h-2 bg-slate-200 rounded col-span-2"></div>
-                       <div className="h-2 bg-slate-200 rounded col-span-1"></div>
-                     </div>
-                     <div className="h-2 bg-slate-200 rounded"></div>
-                   </div>
-                 </div>
+              {/* Large spinning wheel */}
+              <div className="relative">
+                <div className="animate-spin h-16 w-16 border-4 border-fuchsia-200 border-t-fuchsia-600 rounded-full"></div>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Search className="w-6 h-6 text-fuchsia-600" />
+                </div>
               </div>
-              <p className="text-gray-500 font-medium">Analyzing commentaries from selected firms...</p>
+              <div className="space-y-2">
+                <p className="text-xl font-semibold text-gray-700">Searching Law Firm Commentaries...</p>
+                <p className="text-gray-500">Analyzing {selectedFirms.length} firms across {selectedTopicIds.length} topic(s)</p>
+              </div>
+              <p className="text-gray-400 text-sm">Click "Abort Search" to cancel</p>
             </div>
           )}
 

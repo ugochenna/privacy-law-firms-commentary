@@ -39,6 +39,9 @@ export const generateLegalReport = async (config: ReportConfig): Promise<Generat
   const searchEndpoint = searchProvider === 'tavily' ? '/api/search-tavily' : '/api/search';
   const searchProviderLabel = searchProvider === 'tavily' ? 'Tavily (AI Research)' : 'Serper (Google Search)';
 
+  // Get abort signal if provided
+  const abortSignal = config.abortSignal;
+
   console.log(`[Search] Using provider: ${searchProviderLabel}`);
 
   // Extract years from date range for query filtering
@@ -91,8 +94,10 @@ export const generateLegalReport = async (config: ReportConfig): Promise<Generat
               query: query,
               include_domains: [domain],
               start_date: config.startDate,
-              end_date: config.endDate
-            })
+              end_date: config.endDate,
+              strict_date_filter: config.strictDateFilter || false
+            }),
+            signal: abortSignal
           });
 
           if (response.ok) {
@@ -211,9 +216,14 @@ Brief 2-3 sentence overview of key new/proposed laws identified across all firms
 `;
 
   try {
-    // Add 5 minute timeout to match server
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 300000);
+    // Add 5 minute timeout, but allow user abort to take precedence
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), 300000);
+
+    // If user provided an abort signal, listen for it
+    if (abortSignal) {
+      abortSignal.addEventListener('abort', () => timeoutController.abort());
+    }
 
     const response = await fetch(`${API_BASE}/api/generate`, {
       method: "POST",
@@ -221,7 +231,7 @@ Brief 2-3 sentence overview of key new/proposed laws identified across all firms
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ prompt }),
-      signal: controller.signal
+      signal: abortSignal || timeoutController.signal
     });
 
     clearTimeout(timeoutId);

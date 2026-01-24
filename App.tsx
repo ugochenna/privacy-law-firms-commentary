@@ -38,7 +38,7 @@ function App() {
   const [isFirmDropdownOpen, setIsFirmDropdownOpen] = useState(false);
   const [searchProvider, setSearchProvider] = useState<SearchProvider>('tavily'); // Default to Tavily (AI Research)
   const [autoSave, setAutoSave] = useState(true);
-  const [strictDateFilter, setStrictDateFilter] = useState(true); // When true, exclude articles with no detectable date
+  const [strictDateFilter, setStrictDateFilter] = useState(false); // When true, exclude articles with no detectable date
   
   const [report, setReport] = useState<GeneratedReport | null>(null);
   const [loading, setLoading] = useState(false);
@@ -135,7 +135,7 @@ function App() {
     setSelectedTopicIds([]);
     setSelectedFirms([...TOP_20_FIRMS]);
     setSearchProvider('tavily');
-    setStrictDateFilter(true);
+    setStrictDateFilter(false);
     setReport(null);
     setError(null);
     setCurrentReportId(null);

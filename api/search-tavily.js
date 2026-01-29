@@ -1,7 +1,15 @@
-import pdfParse from 'pdf-parse/lib/pdf-parse.js';
+// Lazy-load pdf-parse so a missing/broken package doesn't crash the entire function
+let PDFParseClass = null;
+try {
+  const mod = await import('pdf-parse');
+  PDFParseClass = mod.PDFParse;
+} catch {
+  console.log('[Tavily] pdf-parse not available, PDF date extraction disabled');
+}
 
-// Helper function to extract publication date from PDF
+// Helper function to extract publication date from PDF (uses pdf-parse v2 API)
 async function extractDateFromPdf(url) {
+  if (!PDFParseClass) return null;
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 10000);
@@ -20,10 +28,11 @@ async function extractDateFromPdf(url) {
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    const pdfData = await pdfParse(buffer);
+    const parser = new PDFParseClass({ data: buffer });
+    const info = await parser.getInfo();
 
-    if (pdfData.info) {
-      const creationDate = pdfData.info.CreationDate;
+    if (info) {
+      const creationDate = info.CreationDate;
       if (creationDate) {
         const dateMatch = creationDate.match(/D:(\d{4})(\d{2})(\d{2})/);
         if (dateMatch) {
@@ -34,7 +43,7 @@ async function extractDateFromPdf(url) {
         }
       }
 
-      const modDate = pdfData.info.ModDate;
+      const modDate = info.ModDate;
       if (modDate) {
         const dateMatch = modDate.match(/D:(\d{4})(\d{2})(\d{2})/);
         if (dateMatch) {
@@ -46,47 +55,38 @@ async function extractDateFromPdf(url) {
       }
     }
 
-    if (pdfData.text) {
-      const textSample = pdfData.text.substring(0, 2000);
+    const textResult = await parser.getText({ maxPages: 1 });
+    const textSample = (textResult?.text || '').substring(0, 2000);
+
+    if (textSample) {
       const months = 'January|February|March|April|May|June|July|August|September|October|November|December';
       const monthsAbbrev = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
 
-      // "July 23, 2025" format (supports 2000-2039)
       const monthDayYear = new RegExp(`(${months})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i');
       const match = textSample.match(monthDayYear);
       if (match) {
         const date = new Date(`${match[1]} ${match[2]}, ${match[3]}`);
-        if (!isNaN(date.getTime())) {
-          return date;
-        }
+        if (!isNaN(date.getTime())) return date;
       }
 
-      // "23 July 2025" format (supports 2000-2039)
       const dayMonthYear = new RegExp(`(\\d{1,2})\\s+(${months})\\s+(20[0-3]\\d)`, 'i');
       const dayMonthMatch = textSample.match(dayMonthYear);
       if (dayMonthMatch) {
         const date = new Date(`${dayMonthMatch[2]} ${dayMonthMatch[1]}, ${dayMonthMatch[3]}`);
-        if (!isNaN(date.getTime())) {
-          return date;
-        }
+        if (!isNaN(date.getTime())) return date;
       }
 
-      // Abbreviated months: "Jul 23, 2025" (supports 2000-2039)
       const abbrevMonthDayYear = new RegExp(`(${monthsAbbrev})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i');
       const abbrevMatch = textSample.match(abbrevMonthDayYear);
       if (abbrevMatch) {
         const date = new Date(`${abbrevMatch[1]} ${abbrevMatch[2]}, ${abbrevMatch[3]}`);
-        if (!isNaN(date.getTime())) {
-          return date;
-        }
+        if (!isNaN(date.getTime())) return date;
       }
 
       const isoMatch = textSample.match(/\b(20[0-3]\d)[-\/](0[1-9]|1[0-2])[-\/](0[1-9]|[12]\d|3[01])\b/);
       if (isoMatch) {
         const date = new Date(isoMatch[0]);
-        if (!isNaN(date.getTime())) {
-          return date;
-        }
+        if (!isNaN(date.getTime())) return date;
       }
     }
 
@@ -132,12 +132,14 @@ async function extractDateFromUrl(url) {
 
     const contentType = response.headers.get('content-type') || '';
     if (contentType.includes('application/pdf')) {
+      if (!PDFParseClass) return null;
       const arrayBuffer = await response.arrayBuffer();
       const buffer = Buffer.from(arrayBuffer);
       try {
-        const pdfData = await pdfParse(buffer);
-        if (pdfData.info?.CreationDate) {
-          const dateMatch = pdfData.info.CreationDate.match(/D:(\d{4})(\d{2})(\d{2})/);
+        const parser = new PDFParseClass({ data: buffer });
+        const info = await parser.getInfo();
+        if (info?.CreationDate) {
+          const dateMatch = info.CreationDate.match(/D:(\d{4})(\d{2})(\d{2})/);
           if (dateMatch) {
             const date = new Date(`${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`);
             if (!isNaN(date.getTime())) {

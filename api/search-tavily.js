@@ -254,60 +254,91 @@ async function extractDateFromUrl(url) {
   }
 }
 
-// Filter results by scraping HTML for publication dates - PARALLEL VERSION for Vercel
+// Filter results by scraping HTML for publication dates - BATCHED PARALLEL VERSION
 async function filterByScrapedDate(results, startDate, endDate, strictMode = false) {
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
+  const filteredResults = [];
+  const needsScraping = [];
 
-  console.log(`[Tavily] filterByScrapedDate: ${results.length} results, strict=${strictMode}, range=${startDate} to ${endDate}`);
-
-  // Process all URLs in parallel instead of sequentially (fixes Vercel timeout)
-  const processedResults = await Promise.all(
-    results.map(async (item) => {
-      // If item already has a valid published_date, check it
-      if (item.published_date) {
-        const pubMs = new Date(item.published_date).getTime();
-        if (!isNaN(pubMs)) {
-          if (pubMs >= startMs && pubMs <= endMs) {
-            console.log(`[Tavily] KEEP (API date): ${item.url} - ${item.published_date}`);
-            return item;
-          }
-          console.log(`[Tavily] SKIP (API date out of range): ${item.url} - ${item.published_date}`);
-          return null; // Date exists but outside range
+  // Phase 1: Quickly process items that already have dates (no network calls)
+  for (const item of results) {
+    if (item.published_date) {
+      const pubMs = new Date(item.published_date).getTime();
+      if (!isNaN(pubMs)) {
+        if (pubMs >= startMs && pubMs <= endMs) {
+          filteredResults.push(item);
+        } else {
+          console.log(`[Tavily] Filtered by API date: ${item.url} (${item.published_date} outside range)`);
         }
+        continue;
+      }
+    }
+    // No valid date — needs scraping
+    needsScraping.push(item);
+  }
+
+  console.log(`[Tavily] ${filteredResults.length} items with API dates, ${needsScraping.length} need scraping`);
+
+  // Phase 2: Scrape URLs in parallel (max 5 concurrent) with overall 25s timeout
+  if (needsScraping.length > 0) {
+    const SCRAPE_CONCURRENCY = 5;
+    const OVERALL_TIMEOUT_MS = 25000;
+    const scrapeStartTime = Date.now();
+
+    for (let i = 0; i < needsScraping.length; i += SCRAPE_CONCURRENCY) {
+      // Check overall timeout
+      if (Date.now() - scrapeStartTime > OVERALL_TIMEOUT_MS) {
+        console.log(`[Tavily] Overall timeout reached after ${i} URLs. Including remaining ${needsScraping.length - i} items without date check.`);
+        for (let j = i; j < needsScraping.length; j++) {
+          if (!strictMode) {
+            filteredResults.push(needsScraping[j]);
+          }
+        }
+        break;
       }
 
-      // Try to scrape the date from the URL
-      try {
-        const scrapedDate = await extractDateFromUrl(item.url);
+      const batch = needsScraping.slice(i, i + SCRAPE_CONCURRENCY);
+      const remainingTime = OVERALL_TIMEOUT_MS - (Date.now() - scrapeStartTime);
+
+      const batchPromises = batch.map(async (item) => {
+        try {
+          const scrapedDate = await Promise.race([
+            extractDateFromUrl(item.url),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('scrape timeout')), Math.min(8000, remainingTime)))
+          ]);
+          return { item, scrapedDate };
+        } catch {
+          return { item, scrapedDate: null };
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+
+      for (const { item, scrapedDate } of batchResults) {
         if (scrapedDate) {
           const pubMs = scrapedDate.getTime();
           item.published_date = scrapedDate.toISOString().split('T')[0];
           item.date_source = 'scraped';
           if (pubMs >= startMs && pubMs <= endMs) {
-            console.log(`[Tavily] KEEP (scraped): ${item.url} - ${item.published_date}`);
-            return item;
+            filteredResults.push(item);
+          } else {
+            console.log(`[Tavily] Filtered: ${item.url} (date: ${item.published_date} outside range)`);
           }
-          console.log(`[Tavily] SKIP (scraped date out of range): ${item.url} - ${item.published_date}`);
-          return null; // Scraped date outside range
+        } else {
+          // No date found - include unless strict mode
+          if (!strictMode) {
+            filteredResults.push(item);
+          } else {
+            console.log(`[Tavily] Excluded (strict mode): ${item.url} (no date found)`);
+          }
         }
-      } catch (e) {
-        console.log(`[Tavily] Scrape error for ${item.url}: ${e.message}`);
       }
+    }
+  }
 
-      // No date found - include only if not in strict mode
-      if (strictMode) {
-        console.log(`[Tavily] SKIP (strict mode, no date): ${item.url}`);
-        return null;
-      }
-      console.log(`[Tavily] KEEP (no date, non-strict): ${item.url}`);
-      return item;
-    })
-  );
-
-  const filtered = processedResults.filter(Boolean);
-  console.log(`[Tavily] filterByScrapedDate result: ${filtered.length} of ${results.length} kept`);
-  return filtered;
+  console.log(`[Tavily] Final: ${filteredResults.length} results after date filtering (strict: ${strictMode})`);
+  return filteredResults;
 }
 
 export default async function handler(req, res) {
@@ -327,22 +358,21 @@ export default async function handler(req, res) {
     // Debug logging for Vercel
     console.log('[Tavily] Request received:', { query, include_domains, start_date, end_date, strict_date_filter });
 
-    let days = 365;
-    if (start_date) {
-      const startMs = new Date(start_date).getTime();
-      const nowMs = Date.now();
-      days = Math.ceil((nowMs - startMs) / (1000 * 60 * 60 * 24));
-    }
-
     const tavilyRequest = {
       api_key: TAVILY_API_KEY,
       query: query,
       search_depth: 'advanced',
       include_answer: false,
       include_raw_content: false,
-      max_results: 10,
-      days: days
+      max_results: 20
     };
+
+    // Use start_date/end_date params (newer Tavily API) for precise date filtering
+    if (start_date && end_date) {
+      tavilyRequest.start_date = start_date;
+      tavilyRequest.end_date = end_date;
+      console.log('[Tavily] Using start_date/end_date:', start_date, 'to', end_date);
+    }
 
     if (include_domains && include_domains.length > 0) {
       tavilyRequest.include_domains = include_domains;
@@ -380,27 +410,63 @@ export default async function handler(req, res) {
       });
     }
 
-    let results = filteredResults.map(item => ({
-      title: item.title,
-      url: item.url,
-      content: item.content || '',
-      published_date: item.published_date || null
-    }));
+    // Try to extract dates from content text and URL when Tavily doesn't provide published_date
+    let results = filteredResults.map(item => {
+      let pubDate = item.published_date || null;
 
-    // Final date filtering by scraping actual pages - with timeout fallback
-    if (start_date && end_date) {
-      const preScrapedResults = [...results]; // Keep a copy in case scraping times out
-      try {
-        const scrapePromise = filterByScrapedDate(results, start_date, end_date, strict_date_filter);
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Scrape timeout')), 25000)
-        );
-        results = await Promise.race([scrapePromise, timeoutPromise]);
-      } catch (e) {
-        console.log('[Tavily] Scraping timed out, returning API-filtered results');
-        // On timeout, return results filtered only by API dates (not strict scraped filtering)
-        results = preScrapedResults;
+      if (!pubDate) {
+        // Try extracting date from URL path (e.g., /2025/11/article-name)
+        const urlDateMatch = item.url.match(/\/(\d{4})\/(\d{2})(?:\/(\d{2}))?\/[a-zA-Z]/);
+        if (urlDateMatch) {
+          const year = urlDateMatch[1];
+          const month = urlDateMatch[2];
+          const day = urlDateMatch[3] || '15';
+          const d = new Date(`${year}-${month}-${day}`);
+          if (!isNaN(d.getTime())) {
+            pubDate = d.toISOString().split('T')[0];
+            console.log(`[Tavily] Extracted date from URL: ${pubDate} for ${item.url}`);
+          }
+        }
       }
+
+      if (!pubDate && item.content) {
+        // Try extracting date from content snippet
+        const months = 'January|February|March|April|May|June|July|August|September|October|November|December';
+        const monthsAbbrev = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
+        const contentPatterns = [
+          new RegExp(`(${months})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i'),
+          new RegExp(`(\\d{1,2})\\s+(${months})\\s+(20[0-3]\\d)`, 'i'),
+          new RegExp(`(${monthsAbbrev})\\s+(\\d{1,2}),?\\s+(20[0-3]\\d)`, 'i'),
+          /\b(20[0-3]\d)[-\/](0[1-9]|1[0-2])[-\/](0[1-9]|[12]\d|3[01])\b/,
+        ];
+        for (const pattern of contentPatterns) {
+          const match = item.content.match(pattern);
+          if (match) {
+            const d = new Date(match[0]);
+            if (!isNaN(d.getTime())) {
+              pubDate = d.toISOString().split('T')[0];
+              console.log(`[Tavily] Extracted date from content: ${pubDate} for ${item.url}`);
+              break;
+            }
+          }
+        }
+      }
+
+      return {
+        title: item.title,
+        url: item.url,
+        content: item.content || '',
+        published_date: pubDate
+      };
+    });
+
+    console.log(`[Tavily] After content/URL date extraction: ${results.filter(r => r.published_date).length}/${results.length} have dates`);
+
+    // Final date filtering by scraping actual pages
+    if (start_date && end_date) {
+      const beforeScrape = results.length;
+      results = await filterByScrapedDate(results, start_date, end_date, strict_date_filter);
+      console.log(`[Tavily] Scrape filtering: ${beforeScrape} -> ${results.length} results`);
     }
 
     console.log('[Tavily] Final results:', results.length, strict_date_filter ? '(strict mode)' : '');

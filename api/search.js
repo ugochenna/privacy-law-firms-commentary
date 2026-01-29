@@ -199,60 +199,91 @@ async function extractDateFromUrl(url) {
   }
 }
 
-// Filter results by scraping HTML for publication dates - PARALLEL VERSION for Vercel
+// Filter results by scraping HTML for publication dates - BATCHED PARALLEL VERSION
 async function filterByScrapedDate(results, startDate, endDate, strictMode = false) {
   const startMs = new Date(startDate).getTime();
   const endMs = new Date(endDate).getTime();
+  const filteredResults = [];
+  const needsScraping = [];
 
-  console.log(`[Serper] filterByScrapedDate: ${results.length} results, strict=${strictMode}, range=${startDate} to ${endDate}`);
-
-  // Process all URLs in parallel instead of sequentially (fixes Vercel timeout)
-  const processedResults = await Promise.all(
-    results.map(async (item) => {
-      // If item already has a valid published_date, check it
-      if (item.published_date) {
-        const pubMs = new Date(item.published_date).getTime();
-        if (!isNaN(pubMs)) {
-          if (pubMs >= startMs && pubMs <= endMs) {
-            console.log(`[Serper] KEEP (API date): ${item.url} - ${item.published_date}`);
-            return item;
-          }
-          console.log(`[Serper] SKIP (API date out of range): ${item.url} - ${item.published_date}`);
-          return null; // Date exists but outside range
+  // Phase 1: Quickly process items that already have dates (no network calls)
+  for (const item of results) {
+    if (item.published_date) {
+      const pubMs = new Date(item.published_date).getTime();
+      if (!isNaN(pubMs)) {
+        if (pubMs >= startMs && pubMs <= endMs) {
+          filteredResults.push(item);
+        } else {
+          console.log(`[Serper] Filtered by API date: ${item.url} (${item.published_date} outside range)`);
         }
+        continue;
+      }
+    }
+    // No valid date — needs scraping
+    needsScraping.push(item);
+  }
+
+  console.log(`[Serper] ${filteredResults.length} items with API dates, ${needsScraping.length} need scraping`);
+
+  // Phase 2: Scrape URLs in parallel (max 5 concurrent) with overall 25s timeout
+  if (needsScraping.length > 0) {
+    const SCRAPE_CONCURRENCY = 5;
+    const OVERALL_TIMEOUT_MS = 25000;
+    const scrapeStartTime = Date.now();
+
+    for (let i = 0; i < needsScraping.length; i += SCRAPE_CONCURRENCY) {
+      // Check overall timeout
+      if (Date.now() - scrapeStartTime > OVERALL_TIMEOUT_MS) {
+        console.log(`[Serper] Overall timeout reached after ${i} URLs. Including remaining ${needsScraping.length - i} items without date check.`);
+        for (let j = i; j < needsScraping.length; j++) {
+          if (!strictMode) {
+            filteredResults.push(needsScraping[j]);
+          }
+        }
+        break;
       }
 
-      // Try to scrape the date from the URL
-      try {
-        const scrapedDate = await extractDateFromUrl(item.url);
+      const batch = needsScraping.slice(i, i + SCRAPE_CONCURRENCY);
+      const remainingTime = OVERALL_TIMEOUT_MS - (Date.now() - scrapeStartTime);
+
+      const batchPromises = batch.map(async (item) => {
+        try {
+          const scrapedDate = await Promise.race([
+            extractDateFromUrl(item.url),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('scrape timeout')), Math.min(8000, remainingTime)))
+          ]);
+          return { item, scrapedDate };
+        } catch {
+          return { item, scrapedDate: null };
+        }
+      });
+
+      const batchResults = await Promise.all(batchPromises);
+
+      for (const { item, scrapedDate } of batchResults) {
         if (scrapedDate) {
           const pubMs = scrapedDate.getTime();
           item.published_date = scrapedDate.toISOString().split('T')[0];
           item.date_source = 'scraped';
           if (pubMs >= startMs && pubMs <= endMs) {
-            console.log(`[Serper] KEEP (scraped): ${item.url} - ${item.published_date}`);
-            return item;
+            filteredResults.push(item);
+          } else {
+            console.log(`[Serper] Filtered: ${item.url} (date: ${item.published_date} outside range)`);
           }
-          console.log(`[Serper] SKIP (scraped date out of range): ${item.url} - ${item.published_date}`);
-          return null; // Scraped date outside range
+        } else {
+          // No date found - include unless strict mode
+          if (!strictMode) {
+            filteredResults.push(item);
+          } else {
+            console.log(`[Serper] Excluded (strict mode): ${item.url} (no date found)`);
+          }
         }
-      } catch (e) {
-        console.log(`[Serper] Scrape error for ${item.url}: ${e.message}`);
       }
+    }
+  }
 
-      // No date found - include only if not in strict mode
-      if (strictMode) {
-        console.log(`[Serper] SKIP (strict mode, no date): ${item.url}`);
-        return null;
-      }
-      console.log(`[Serper] KEEP (no date, non-strict): ${item.url}`);
-      return item;
-    })
-  );
-
-  const filtered = processedResults.filter(Boolean);
-  console.log(`[Serper] filterByScrapedDate result: ${filtered.length} of ${results.length} kept`);
-  return filtered;
+  console.log(`[Serper] Final: ${filteredResults.length} results after date filtering (strict: ${strictMode})`);
+  return filteredResults;
 }
 
 // Serper search endpoint - IMPROVED v2
@@ -303,25 +334,27 @@ export default async function handler(req, res) {
 
     console.log('[Serper] Raw results:', filteredResults.length);
 
-    // Filter out non-content pages (cookie notices, attorney profiles, etc.)
+    // Filter out non-content pages — only exclude standalone policy/profile pages,
+    // not articles that happen to mention privacy/cookies in their URL
     filteredResults = filteredResults.filter(item => {
-      const url = item.link.toLowerCase();
       const title = (item.title || '').toLowerCase();
+      const path = new URL(item.link).pathname.toLowerCase();
 
-      // Exclude cookie/privacy policy pages
-      if (url.includes('/cookie') || url.includes('/privacy-policy') || url.includes('/privacy-notice')) {
+      // Exclude standalone cookie/privacy policy pages (path ends with these)
+      if (path.endsWith('/cookie-policy') || path.endsWith('/cookie-notice') ||
+          path.endsWith('/privacy-policy') || path.endsWith('/privacy-notice') ||
+          path.endsWith('/cookies')) {
+        console.log(`[Serper] Filtered (policy page): ${item.link}`);
         return false;
       }
-      // Exclude attorney profile pages
-      if (url.includes('/people/') || url.includes('/attorneys/') || url.includes('/lawyer/') || url.includes('/team/')) {
+      // Exclude generic non-content pages
+      if (path.endsWith('/about-us') || path.endsWith('/contact') || path.endsWith('/careers')) {
+        console.log(`[Serper] Filtered (generic page): ${item.link}`);
         return false;
       }
-      // Exclude generic pages
-      if (url.includes('/about-us') || url.includes('/contact') || url.includes('/careers')) {
-        return false;
-      }
-      // Exclude if title suggests it's just a cookie notice
-      if (title.includes('cookie notice') || title.includes('cookie policy')) {
+      // Exclude if title is clearly just a cookie/privacy notice (not an article about it)
+      if (title === 'cookie notice' || title === 'cookie policy' || title === 'privacy policy') {
+        console.log(`[Serper] Filtered (policy title): ${item.link}`);
         return false;
       }
       return true;
@@ -348,20 +381,11 @@ export default async function handler(req, res) {
       published_date: item.date || null
     }));
 
-    // Final date filtering by scraping actual pages - with timeout fallback
+    // Final date filtering by scraping actual pages
     if (start_date && end_date) {
-      const preScrapedResults = [...results]; // Keep a copy in case scraping times out
-      try {
-        const scrapePromise = filterByScrapedDate(results, start_date, end_date, strict_date_filter);
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Scrape timeout')), 25000)
-        );
-        results = await Promise.race([scrapePromise, timeoutPromise]);
-      } catch (e) {
-        console.log('[Serper] Scraping timed out, returning API-filtered results');
-        // On timeout, return results filtered only by API dates (not strict scraped filtering)
-        results = preScrapedResults;
-      }
+      const beforeScrape = results.length;
+      results = await filterByScrapedDate(results, start_date, end_date, strict_date_filter);
+      console.log(`[Serper] Scrape filtering: ${beforeScrape} -> ${results.length} results`);
     }
 
     console.log('[Serper] Final results:', results.length, strict_date_filter ? '(strict mode)' : '');

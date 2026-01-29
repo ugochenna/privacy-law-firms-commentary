@@ -52,161 +52,129 @@ export const generateLegalReport = async (config: ReportConfig): Promise<Generat
   const yearFilter = startYear === endYear ? startYear : `(${startYear} OR ${endYear})`;
 
   // Topic keywords mapping - keys must match LEGAL_TOPICS labels exactly
-  // Each topic has 2 query variants covering different angles of the same legal area
-  // This doubles searches but dramatically improves hit rate vs. one long AND query
-  const topicKeywords: Record<string, string[]> = {
-    'Privacy / Data Protection': [
-      'data protection law new regulation',
-      'privacy compliance enforcement action'
-    ],
-    'AI / Automated Decision-Making': [
-      'artificial intelligence AI regulation law',
-      'automated decision-making algorithmic governance'
-    ],
-    'Cybersecurity / Incident Reporting': [
-      'cybersecurity regulation compliance requirement',
-      'data breach notification incident reporting'
-    ],
-    'Health Information / HIPAA-type': [
-      'HIPAA health data privacy regulation',
-      'health information protection law'
-    ],
-    'Patient Support Programs': [
-      'patient support program pharmaceutical compliance',
-      'copay assistance hub services FDA regulation'
-    ],
-    'Consent, Digital Tracking & Privacy Notices': [
-      'cookie consent banner regulation',
-      'online tracking privacy notice requirement'
-    ]
+  // Each topic uses a single OR-based query to cover multiple angles while reducing API calls
+  const topicKeywords: Record<string, string> = {
+    'Privacy / Data Protection': '(data protection OR privacy) regulation compliance',
+    'AI / Automated Decision-Making': '(artificial intelligence OR automated decision-making) AI regulation',
+    'Cybersecurity / Incident Reporting': '(cybersecurity OR data breach) regulation notification',
+    'Health Information / HIPAA-type': 'HIPAA health (data privacy OR information protection)',
+    'Patient Support Programs': '(patient support program OR copay assistance) pharmaceutical',
+    'Consent, Digital Tracking & Privacy Notices': '(cookie consent OR online tracking) privacy regulation'
   };
 
   try {
     const firms = config.selectedFirms;
     const topics = config.selectedTopics;
 
-    // Calculate total searches: firms × topics × keyword variants (2 per topic)
-    const totalVariants = topics.reduce((sum, t) => {
-      const variants = topicKeywords[t.label] || [t.label.split('/')[0].trim()];
-      return sum + variants.length;
-    }, 0);
-    console.log(`[Search] Total searches: ${firms.length * totalVariants} (${firms.length} firms × ${topics.length} topics × ~2 keyword variants)`);
+    // Calculate total searches: firms × topics (1 query per topic now with OR operators)
+    const totalSearches = firms.length * topics.length;
+    console.log(`[Search] Total searches: ${totalSearches} (${firms.length} firms × ${topics.length} topics)`);
 
     const batchSize = 4; // Process 4 searches at a time to stay under 5/sec limit
     const resultsByFirm: Record<string, string[]> = {};
     // Track seen URLs per firm to deduplicate across keyword variants
     const seenUrlsByFirm: Record<string, Set<string>> = {};
 
-    // Search one topic at a time, iterating keyword variants then firms
+    // Search one topic at a time across all firms
     for (let topicIdx = 0; topicIdx < topics.length; topicIdx++) {
       const topic = topics[topicIdx];
-      const keywordVariants = topicKeywords[topic.label] || [topic.label.split('/')[0].trim()];
-      console.log(`[Search] === Topic ${topicIdx + 1}/${topics.length}: ${topic.label} (${keywordVariants.length} query variants) ===`);
+      const keywords = topicKeywords[topic.label] || topic.label.split('/')[0].trim();
+      console.log(`[Search] === Topic ${topicIdx + 1}/${topics.length}: ${topic.label} ===`);
+      console.log(`[Search]   Query: "${keywords}"`);
 
       let topicResultCount = 0;
 
-      // Run each keyword variant across all firms
-      for (let variantIdx = 0; variantIdx < keywordVariants.length; variantIdx++) {
-        const keywords = keywordVariants[variantIdx];
-        console.log(`[Search]   Variant ${variantIdx + 1}/${keywordVariants.length}: "${keywords}"`);
+      const firmTasks = firms.map(firm => ({ firm, topic, keywords }));
 
-        const firmTasks = firms.map(firm => ({ firm, topic, keywords }));
+      for (let i = 0; i < firmTasks.length; i += batchSize) {
+        const batch = firmTasks.slice(i, i + batchSize);
 
-        for (let i = 0; i < firmTasks.length; i += batchSize) {
-          const batch = firmTasks.slice(i, i + batchSize);
+        const searchPromises = batch.map(async ({ firm, topic, keywords }) => {
+          try {
+            // Extract root domain (drop subdomains like www, resourcehub, etc.)
+            // e.g. "resourcehub.bakermckenzie.com" → "bakermckenzie.com"
+            const hostname = new URL(firm.url).hostname;
+            const parts = hostname.split('.');
+            const domain = parts.length > 2 ? parts.slice(-2).join('.') : hostname;
+            const query = `${keywords} law regulation ${yearFilter}`;
 
-          const searchPromises = batch.map(async ({ firm, topic, keywords }) => {
-            try {
-              // Extract root domain (drop subdomains like www, resourcehub, etc.)
-              // e.g. "resourcehub.bakermckenzie.com" → "bakermckenzie.com"
-              const hostname = new URL(firm.url).hostname;
-              const parts = hostname.split('.');
-              const domain = parts.length > 2 ? parts.slice(-2).join('.') : hostname;
-              const query = `${keywords} law regulation ${yearFilter}`;
+            console.log(`[Search] Fetching: ${firm.name} / ${topic.label} (domain: ${domain})`);
 
-              console.log(`[Search] Fetching: ${firm.name} / ${topic.label} v${variantIdx + 1} (domain: ${domain})`);
+            const response = await fetch(`${API_BASE}${searchEndpoint}`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                query: query,
+                include_domains: [domain],
+                start_date: config.startDate,
+                end_date: config.endDate,
+                strict_date_filter: config.strictDateFilter || false
+              }),
+              signal: abortSignal
+            });
 
-              const response = await fetch(`${API_BASE}${searchEndpoint}`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                  query: query,
-                  include_domains: [domain],
-                  start_date: config.startDate,
-                  end_date: config.endDate,
-                  strict_date_filter: config.strictDateFilter || false
-                }),
-                signal: abortSignal
-              });
+            if (response.ok) {
+              const data: TavilyResponse = await response.json();
+              if (data.results && data.results.length > 0) {
+                // Deduplicate: filter out URLs already seen for this firm
+                if (!seenUrlsByFirm[firm.name]) {
+                  seenUrlsByFirm[firm.name] = new Set();
+                }
+                const newResults = data.results.filter(r => !seenUrlsByFirm[firm.name].has(r.url));
+                // Mark these URLs as seen
+                for (const r of data.results) {
+                  seenUrlsByFirm[firm.name].add(r.url);
+                }
 
-              if (response.ok) {
-                const data: TavilyResponse = await response.json();
-                if (data.results && data.results.length > 0) {
-                  // Deduplicate: filter out URLs already seen for this firm
-                  if (!seenUrlsByFirm[firm.name]) {
-                    seenUrlsByFirm[firm.name] = new Set();
-                  }
-                  const newResults = data.results.filter(r => !seenUrlsByFirm[firm.name].has(r.url));
-                  // Mark these URLs as seen
-                  for (const r of data.results) {
-                    seenUrlsByFirm[firm.name].add(r.url);
-                  }
-
-                  if (newResults.length > 0) {
-                    console.log(`[Search] ${firm.name} / ${topic.label} v${variantIdx + 1}: ${newResults.length} new results (${data.results.length - newResults.length} dupes skipped)`);
-                    // Take top 10 new results for better coverage
-                    const topResults = newResults.slice(0, 10);
-                    const formattedResults = topResults.map(r => {
-                      const title = r.title.length > 80 ? r.title.substring(0, 80) + '...' : r.title;
-                      const content = r.content.length > 150 ? r.content.substring(0, 150) + '...' : r.content;
-                      return `- [${topic.label}] **${title}**\n  ${r.url}\n  ${content}`;
-                    });
-                    return {
-                      firmName: firm.name,
-                      topicLabel: topic.label,
-                      result: formattedResults.join('\n'),
-                      count: topResults.length
-                    };
-                  } else {
-                    console.log(`[Search] ${firm.name} / ${topic.label} v${variantIdx + 1}: ${data.results.length} results (all duplicates)`);
-                  }
+                if (newResults.length > 0) {
+                  console.log(`[Search] ${firm.name} / ${topic.label}: ${newResults.length} new results (${data.results.length - newResults.length} dupes skipped)`);
+                  // Take top 10 new results for better coverage
+                  const topResults = newResults.slice(0, 10);
+                  const formattedResults = topResults.map(r => {
+                    const title = r.title.length > 80 ? r.title.substring(0, 80) + '...' : r.title;
+                    const content = r.content.length > 150 ? r.content.substring(0, 150) + '...' : r.content;
+                    return `- [${topic.label}] **${title}**\n  ${r.url}\n  ${content}`;
+                  });
+                  return {
+                    firmName: firm.name,
+                    topicLabel: topic.label,
+                    result: formattedResults.join('\n'),
+                    count: topResults.length
+                  };
                 } else {
-                  console.log(`[Search] ${firm.name} / ${topic.label} v${variantIdx + 1}: 0 results`);
+                  console.log(`[Search] ${firm.name} / ${topic.label}: ${data.results.length} results (all duplicates)`);
                 }
               } else {
-                const errorText = await response.text().catch(() => 'unknown');
-                console.error(`[Search] ${firm.name} / ${topic.label} v${variantIdx + 1}: HTTP ${response.status} - ${errorText.substring(0, 200)}`);
+                console.log(`[Search] ${firm.name} / ${topic.label}: 0 results`);
               }
-              return null;
-            } catch (err: any) {
-              if (err.name === 'AbortError') throw err; // Re-throw abort so it propagates
-              console.error(`[Search] ${firm.name} / ${topic.label} v${variantIdx + 1}: Error - ${err.message}`);
-              return null;
+            } else {
+              const errorText = await response.text().catch(() => 'unknown');
+              console.error(`[Search] ${firm.name} / ${topic.label}: HTTP ${response.status} - ${errorText.substring(0, 200)}`);
             }
-          });
-
-          const batchResults = await Promise.all(searchPromises);
-
-          // Group results by firm
-          for (const result of batchResults) {
-            if (result) {
-              if (!resultsByFirm[result.firmName]) {
-                resultsByFirm[result.firmName] = [];
-              }
-              resultsByFirm[result.firmName].push(result.result);
-              topicResultCount += result.count;
-            }
+            return null;
+          } catch (err: any) {
+            if (err.name === 'AbortError') throw err; // Re-throw abort so it propagates
+            console.error(`[Search] ${firm.name} / ${topic.label}: Error - ${err.message}`);
+            return null;
           }
+        });
 
-          // Wait 1.5 seconds between batches to respect rate limit (5 req/sec)
-          if (i + batchSize < firmTasks.length) {
-            await delay(1500);
+        const batchResults = await Promise.all(searchPromises);
+
+        // Group results by firm
+        for (const result of batchResults) {
+          if (result) {
+            if (!resultsByFirm[result.firmName]) {
+              resultsByFirm[result.firmName] = [];
+            }
+            resultsByFirm[result.firmName].push(result.result);
+            topicResultCount += result.count;
           }
         }
 
-        // Brief delay between keyword variants for the same topic
-        if (variantIdx + 1 < keywordVariants.length) {
-          await delay(1000);
+        // Wait 1.5 seconds between batches to respect rate limit (5 req/sec)
+        if (i + batchSize < firmTasks.length) {
+          await delay(1500);
         }
       }
 

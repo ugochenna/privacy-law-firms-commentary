@@ -19,9 +19,7 @@
  * });
  */
 
-import { createRequire } from 'module';
-const require = createRequire(import.meta.url);
-const pdfParse = require('pdf-parse');
+import { PDFParse } from 'pdf-parse';
 
 // ============================================================================
 // DATE EXTRACTION FROM PDF
@@ -36,31 +34,16 @@ const pdfParse = require('pdf-parse');
  */
 export async function extractDateFromPdf(url) {
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+    // pdf-parse v2 API: pass URL directly, it handles fetching
+    const parser = new PDFParse({ url });
 
-    const response = await fetch(url, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (compatible; DateExtractor/1.0)'
-      },
-      signal: controller.signal
-    });
+    // Get metadata first (fast, no text extraction needed)
+    const infoResult = await parser.getInfo();
 
-    clearTimeout(timeout);
-
-    if (!response.ok) return null;
-
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-
-    const pdfData = await pdfParse(buffer);
-
-    // Check PDF metadata for dates
-    if (pdfData.info) {
+    if (infoResult.info) {
       // Try CreationDate first (usually more accurate for publication)
-      const creationDate = pdfData.info.CreationDate;
+      const creationDate = infoResult.info.CreationDate;
       if (creationDate) {
-        // PDF dates are in format: D:YYYYMMDDHHmmss or similar
         const dateMatch = creationDate.match(/D:(\d{4})(\d{2})(\d{2})/);
         if (dateMatch) {
           const date = new Date(`${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`);
@@ -72,7 +55,7 @@ export async function extractDateFromPdf(url) {
       }
 
       // Try ModDate as fallback
-      const modDate = pdfData.info.ModDate;
+      const modDate = infoResult.info.ModDate;
       if (modDate) {
         const dateMatch = modDate.match(/D:(\d{4})(\d{2})(\d{2})/);
         if (dateMatch) {
@@ -86,8 +69,9 @@ export async function extractDateFromPdf(url) {
     }
 
     // Try to find date in PDF text content (first page usually has date)
-    if (pdfData.text) {
-      const textSample = pdfData.text.substring(0, 2000); // Check first 2000 chars
+    const textResult = await parser.getText({ maxPages: 1 });
+    if (textResult.text) {
+      const textSample = textResult.text.substring(0, 2000);
       const months = 'January|February|March|April|May|June|July|August|September|October|November|December';
       const monthsAbbrev = 'Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec';
 
@@ -197,20 +181,10 @@ export async function extractDateFromUrl(url) {
     // Check Content-Type for PDF (handles PDFs without .pdf extension)
     const contentType = response.headers.get('content-type') || '';
     if (contentType.includes('application/pdf')) {
-      const arrayBuffer = await response.arrayBuffer();
-      const buffer = Buffer.from(arrayBuffer);
       try {
-        const pdfData = await pdfParse(buffer);
-        if (pdfData.info?.CreationDate) {
-          const dateMatch = pdfData.info.CreationDate.match(/D:(\d{4})(\d{2})(\d{2})/);
-          if (dateMatch) {
-            const date = new Date(`${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`);
-            if (!isNaN(date.getTime())) {
-              console.log(`[PDF] Found date via Content-Type: ${date.toISOString().split('T')[0]}`);
-              return date;
-            }
-          }
-        }
+        // Use the dedicated PDF extractor (which uses pdf-parse v2 API)
+        const pdfDate = await extractDateFromPdf(url);
+        if (pdfDate) return pdfDate;
       } catch (e) {
         console.log(`[PDF] Parse error: ${e.message}`);
       }
@@ -577,24 +551,21 @@ export async function searchWithTavily({ query, apiKey, domains, startDate, endD
     console.log('[Tavily] Date range:', startDate, 'to', endDate);
   }
 
-  // Calculate days from start_date to today for Tavily's days parameter
-  let days = 365; // default to 1 year
-  if (startDate) {
-    const startMs = new Date(startDate).getTime();
-    const nowMs = Date.now();
-    days = Math.ceil((nowMs - startMs) / (1000 * 60 * 60 * 24));
-    console.log('[Tavily] Searching last', days, 'days');
-  }
-
   const tavilyRequest = {
     api_key: apiKey,
     query: query,
     search_depth: 'advanced',
     include_answer: false,
     include_raw_content: false,
-    max_results: numResults,
-    days: days
+    max_results: numResults
   };
+
+  // Use start_date/end_date params (newer Tavily API) for precise date filtering
+  if (startDate && endDate) {
+    tavilyRequest.start_date = startDate;
+    tavilyRequest.end_date = endDate;
+    console.log('[Tavily] Using start_date/end_date:', startDate, 'to', endDate);
+  }
 
   // Add domain filtering if provided
   if (domains && domains.length > 0) {

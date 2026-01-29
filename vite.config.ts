@@ -12,6 +12,7 @@ export default defineConfig(({ mode }) => {
           '/api': {
             target: 'http://localhost:3001',
             changeOrigin: true,
+            timeout: 300000, // 5 minutes timeout for long searches
           }
         }
       },

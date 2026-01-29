@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { FileText, Save, RefreshCw, Search, Download, FileSpreadsheet, ChevronDown, Check, FolderOpen } from 'lucide-react';
 import { LEGAL_TOPICS, LAW_FIRMS, PATIENT_SUPPORT_FIRMS, TOP_20_FIRMS } from './constants';
-import { LawFirm, LegalAreaId, GeneratedReport, SavedReport, SearchProvider } from './types';
+import { LawFirm, LegalAreaId, GeneratedReport, SavedReport, SearchProvider, ModelProvider } from './types';
 import TopicCard from './components/TopicCard';
 import { generateLegalReport } from './services/claudeService';
 import { saveReport, isSupabaseConfigured } from './services/supabaseService';
@@ -10,20 +10,30 @@ import SaveReportModal from './components/SaveReportModal';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+// Helper to read saved form state from sessionStorage (survives page reloads/HMR)
+function loadSessionState<T>(key: string, fallback: T): T {
+  try {
+    const saved = sessionStorage.getItem(key);
+    if (saved !== null) return JSON.parse(saved);
+  } catch { /* ignore parse errors */ }
+  return fallback;
+}
+
 function App() {
-  // Default: 1 week ago to today
+  // Default: 3 months ago to today
   const getDefaultDates = () => {
     const end = new Date();
     const start = new Date();
-    start.setDate(start.getDate() - 7);
+    start.setMonth(start.getMonth() - 3);
     return {
       start: start.toISOString().split('T')[0],
       end: end.toISOString().split('T')[0]
     };
   };
   const defaultDates = getDefaultDates();
-  const [startDate, setStartDate] = useState<string>(defaultDates.start);
-  const [endDate, setEndDate] = useState<string>(defaultDates.end);
+  const [startDate, setStartDate] = useState<string>(loadSessionState('startDate', defaultDates.start));
+  const [endDate, setEndDate] = useState<string>(loadSessionState('endDate', defaultDates.end));
+  const [selectedDateShortcut, setSelectedDateShortcut] = useState<number | null>(null);
 
   // Date shortcut helper
   const setDateShortcut = (daysAgo: number) => {
@@ -32,18 +42,41 @@ function App() {
     start.setDate(start.getDate() - daysAgo);
     setStartDate(start.toISOString().split('T')[0]);
     setEndDate(end.toISOString().split('T')[0]);
+    setSelectedDateShortcut(daysAgo);
   };
-  const [selectedTopicIds, setSelectedTopicIds] = useState<string[]>([]); // No topics selected by default
-  const [selectedFirms, setSelectedFirms] = useState<LawFirm[]>([...TOP_20_FIRMS]); // Default to Top 20 Global Firms
+  const [selectedTopicIds, setSelectedTopicIds] = useState<string[]>(loadSessionState('selectedTopicIds', []));
+  const [selectedFirms, setSelectedFirms] = useState<LawFirm[]>(loadSessionState('selectedFirms', [...TOP_20_FIRMS]));
   const [isFirmDropdownOpen, setIsFirmDropdownOpen] = useState(false);
-  const [searchProvider, setSearchProvider] = useState<SearchProvider>('tavily'); // Default to Tavily (AI Research)
+  const [searchProvider, setSearchProvider] = useState<SearchProvider>(loadSessionState('searchProvider', 'tavily'));
+  const [modelProvider, setModelProvider] = useState<ModelProvider>(loadSessionState('modelProvider', 'sonnet'));
   const [autoSave, setAutoSave] = useState(true);
-  const [strictDateFilter, setStrictDateFilter] = useState(true); // When true, exclude articles with no detectable date
-  
-  const [report, setReport] = useState<GeneratedReport | null>(null);
+  const [strictDateFilter, setStrictDateFilter] = useState<boolean>(loadSessionState('strictDateFilter', true));
+
+  // Persist form selections to sessionStorage so they survive page reloads
+  useEffect(() => {
+    sessionStorage.setItem('startDate', JSON.stringify(startDate));
+    sessionStorage.setItem('endDate', JSON.stringify(endDate));
+    sessionStorage.setItem('selectedTopicIds', JSON.stringify(selectedTopicIds));
+    sessionStorage.setItem('selectedFirms', JSON.stringify(selectedFirms));
+    sessionStorage.setItem('searchProvider', JSON.stringify(searchProvider));
+    sessionStorage.setItem('modelProvider', JSON.stringify(modelProvider));
+    sessionStorage.setItem('strictDateFilter', JSON.stringify(strictDateFilter));
+  }, [startDate, endDate, selectedTopicIds, selectedFirms, searchProvider, modelProvider, strictDateFilter]);
+
+  const [report, setReport] = useState<GeneratedReport | null>(loadSessionState('report', null));
   const [loading, setLoading] = useState(false);
+  const [searchStatus, setSearchStatus] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
   const [reportGeneratedAt, setReportGeneratedAt] = useState<Date | null>(null);
+
+  // Persist report to sessionStorage so it survives HMR/page reloads
+  useEffect(() => {
+    if (report) {
+      sessionStorage.setItem('report', JSON.stringify(report));
+    } else {
+      sessionStorage.removeItem('report');
+    }
+  }, [report]);
   const abortControllerRef = useRef<AbortController | null>(null);
 
   // Reports panel and save modal state
@@ -128,7 +161,7 @@ function App() {
   };
 
   const handleReset = () => {
-    // Reset to default settings
+    // Reset to default settings and clear persisted state
     const defaults = getDefaultDates();
     setStartDate(defaults.start);
     setEndDate(defaults.end);
@@ -140,6 +173,7 @@ function App() {
     setError(null);
     setCurrentReportId(null);
     setReportGeneratedAt(null);
+    sessionStorage.clear();
   };
 
   const handleAbort = () => {
@@ -169,6 +203,7 @@ function App() {
     setReport(null);
     setCurrentReportId(null);
     setReportGeneratedAt(null);
+    setSearchStatus('Starting search...');
 
     try {
       const selectedTopicsList = LEGAL_TOPICS.filter(t => selectedTopicIds.includes(t.id));
@@ -178,35 +213,50 @@ function App() {
         selectedFirms,
         selectedTopics: selectedTopicsList,
         searchProvider,
+        modelProvider,
         strictDateFilter,
-        abortSignal: abortControllerRef.current.signal
+        abortSignal: abortControllerRef.current.signal,
+        onProgress: (progress) => {
+          setSearchStatus(`Searching topic ${progress.topicIndex} of ${progress.totalTopics}: ${progress.currentTopic} (${progress.resultsFound} results)`);
+        }
       });
+      setSearchStatus('');
       setReport(result);
       setReportGeneratedAt(new Date());
 
       // Auto-save if enabled and Supabase is configured
+      // Wrapped in separate try-catch so save failures don't lose the report
       if (autoSave && isSupabaseConfigured()) {
-        const reportName = `${selectedTopicsList.map(t => t.label).join(', ')} Report - ${startDate} to ${endDate}`;
-        const savedReport = await saveReport(
-          result,
-          reportName,
-          startDate,
-          endDate,
-          selectedFirms.map(f => f.name),
-          selectedTopicIds
-        );
-        if (savedReport) {
-          setCurrentReportId(savedReport.id);
+        try {
+          const reportName = `${selectedTopicsList.map(t => t.label).join(', ')} Report - ${startDate} to ${endDate}`;
+          const savedReport = await saveReport(
+            result,
+            reportName,
+            startDate,
+            endDate,
+            selectedFirms.map(f => f.name),
+            selectedTopicIds
+          );
+          if (savedReport) {
+            setCurrentReportId(savedReport.id);
+          }
+        } catch (saveErr: any) {
+          console.error('Auto-save failed (report still available):', saveErr);
+          // Don't throw - the report was generated successfully
         }
       }
     } catch (err: any) {
       if (err.name === 'AbortError') {
         setError('Search cancelled by user.');
+      } else if (err.message?.toLowerCase().includes('overloaded')) {
+        setError("The AI model is temporarily overloaded. Please wait a moment and try again. (Tip: Sonnet 4 is less likely to be overloaded than Opus 4.5)");
       } else {
+        console.error('Report generation failed:', err);
         setError("Failed to generate report. Please try again. " + (err.message || ""));
       }
     } finally {
       setLoading(false);
+      setSearchStatus('');
       abortControllerRef.current = null;
     }
   };
@@ -279,6 +329,17 @@ function App() {
     setIsReportsPanelOpen(false);
   };
 
+  // Catch unhandled promise rejections to prevent silent failures
+  useEffect(() => {
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error('Unhandled promise rejection:', event.reason);
+      setError('An unexpected error occurred: ' + (event.reason?.message || String(event.reason)));
+      setLoading(false);
+    };
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    return () => window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+  }, []);
+
   // Close dropdown when clicking outside (simple implementation)
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -321,7 +382,7 @@ function App() {
                 <input
                   type="date"
                   value={startDate}
-                  onChange={(e) => setStartDate(e.target.value)}
+                  onChange={(e) => { setStartDate(e.target.value); setSelectedDateShortcut(null); }}
                   className="flex-1 outline-none bg-transparent text-gray-900 font-medium placeholder-gray-500"
                   style={{ colorScheme: 'light' }}
                 />
@@ -329,7 +390,7 @@ function App() {
                 <input
                   type="date"
                   value={endDate}
-                  onChange={(e) => setEndDate(e.target.value)}
+                  onChange={(e) => { setEndDate(e.target.value); setSelectedDateShortcut(null); }}
                   className="flex-1 outline-none bg-transparent text-gray-900 font-medium placeholder-gray-500"
                   style={{ colorScheme: 'light' }}
                 />
@@ -338,33 +399,39 @@ function App() {
               <div className="flex flex-wrap gap-2 mt-2">
                 <button
                   onClick={() => setDateShortcut(2)}
-                  className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700 transition-colors"
+                  className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${selectedDateShortcut === 2 ? 'bg-fuchsia-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700'}`}
                 >
                   2 days ago
                 </button>
                 <button
                   onClick={() => setDateShortcut(3)}
-                  className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700 transition-colors"
+                  className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${selectedDateShortcut === 3 ? 'bg-fuchsia-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700'}`}
                 >
                   3 days ago
                 </button>
                 <button
                   onClick={() => setDateShortcut(7)}
-                  className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700 transition-colors"
+                  className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${selectedDateShortcut === 7 ? 'bg-fuchsia-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700'}`}
                 >
                   1 week ago
                 </button>
                 <button
                   onClick={() => setDateShortcut(30)}
-                  className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700 transition-colors"
+                  className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${selectedDateShortcut === 30 ? 'bg-fuchsia-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700'}`}
                 >
                   1 month ago
                 </button>
                 <button
                   onClick={() => setDateShortcut(90)}
-                  className="px-3 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700 transition-colors"
+                  className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${selectedDateShortcut === 90 ? 'bg-fuchsia-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700'}`}
                 >
                   3 months ago
+                </button>
+                <button
+                  onClick={() => setDateShortcut(180)}
+                  className={`px-3 py-1 text-xs font-medium rounded-full transition-colors ${selectedDateShortcut === 180 ? 'bg-fuchsia-500 text-white' : 'bg-gray-100 text-gray-700 hover:bg-fuchsia-100 hover:text-fuchsia-700'}`}
+                >
+                  6 months ago
                 </button>
               </div>
             </div>
@@ -542,6 +609,24 @@ function App() {
                   : 'AI-optimized search with full content extraction'}
               </p>
             </div>
+
+            {/* AI Model Dropdown */}
+            <div className="flex flex-col space-y-2">
+              <label className="text-sm font-semibold text-gray-900 uppercase tracking-wide">AI Model</label>
+              <select
+                value={modelProvider}
+                onChange={(e) => setModelProvider(e.target.value as ModelProvider)}
+                className="w-full border-2 border-gray-200 rounded-lg p-3 bg-white hover:border-gray-300 transition-colors text-gray-900 font-medium focus:outline-none focus:border-fuchsia-500"
+              >
+                <option value="sonnet">Sonnet 4 (Recommended)</option>
+                <option value="opus">Opus 4.5 (Highest Quality)</option>
+              </select>
+              <p className="text-xs text-gray-500">
+                {modelProvider === 'sonnet'
+                  ? 'Fast & cost-effective analysis'
+                  : 'Deeper analysis, slower response'}
+              </p>
+            </div>
           </div>
         </div>
 
@@ -664,6 +749,7 @@ function App() {
               <div className="space-y-2">
                 <p className="text-xl font-semibold text-gray-700">Searching Law Firm Commentaries...</p>
                 <p className="text-gray-500">Analyzing {selectedFirms.length} firms across {selectedTopicIds.length} topic(s)</p>
+                {searchStatus && <p className="text-fuchsia-600 font-medium text-sm">{searchStatus}</p>}
               </div>
               <p className="text-gray-400 text-sm">Click "Abort Search" to cancel</p>
             </div>

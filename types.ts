@@ -13,6 +13,7 @@ export interface Topic {
 }
 
 export type SearchProvider = 'serper' | 'tavily';
+export type ModelProvider = 'sonnet' | 'opus';
 
 export interface ReportConfig {
   startDate: string;
@@ -20,8 +21,10 @@ export interface ReportConfig {
   selectedFirms: LawFirm[];
   selectedTopics: Topic[];
   searchProvider: SearchProvider;
+  modelProvider?: ModelProvider;  // 'sonnet' (default) or 'opus' for higher quality
   strictDateFilter?: boolean;  // When true, exclude articles with no detectable publication date
   abortSignal?: AbortSignal;   // For cancelling the search
+  onProgress?: (progress: { currentTopic: string; topicIndex: number; totalTopics: number; resultsFound: number }) => void;
 }
 
 export interface GeneratedReport {
